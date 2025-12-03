@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const authRoutes = require('./routes/authRoutes');
+const pool = require('./db');
 
 dotenv.config();
 
@@ -18,6 +19,22 @@ app.use('/api/auth', authRoutes);
 // Simple test route
 app.get('/', (req, res) => {
     res.send('FydBlock API is running...');
+});
+
+app.get('/test-db', async (req, res) => {
+    try {
+        const result = await pool.query('SELECT NOW()');
+        res.json({ 
+            message: 'Database Connection Successful!', 
+            time: result.rows[0].now 
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ 
+            message: 'Database Connection Failed', 
+            error: err.message 
+        });
+    }
 });
 
 app.listen(PORT, () => {
