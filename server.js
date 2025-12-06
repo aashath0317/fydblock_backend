@@ -3,6 +3,7 @@ const cors = require('cors');
 const dotenv = require('dotenv');
 const authRoutes = require('./routes/authRoutes');
 const pool = require('./db');
+const userRoutes = require('./routes/userRoutes');
 
 dotenv.config();
 
@@ -15,6 +16,7 @@ app.use(express.json()); // Allows backend to understand JSON data
 
 // Routes
 app.use('/api/auth', authRoutes);
+app.use('/api/user', userRoutes);
 
 // Simple test route
 app.get('/', (req, res) => {
@@ -24,15 +26,15 @@ app.get('/', (req, res) => {
 app.get('/test-db', async (req, res) => {
     try {
         const result = await pool.query('SELECT NOW()');
-        res.json({ 
-            message: 'Database Connection Successful!', 
-            time: result.rows[0].now 
+        res.json({
+            message: 'Database Connection Successful!',
+            time: result.rows[0].now
         });
     } catch (err) {
         console.error(err);
-        res.status(500).json({ 
-            message: 'Database Connection Failed', 
-            error: err.message 
+        res.status(500).json({
+            message: 'Database Connection Failed',
+            error: err.message
         });
     }
 });
