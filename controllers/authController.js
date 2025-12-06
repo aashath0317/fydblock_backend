@@ -1,6 +1,8 @@
 const pool = require('../db');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const { OAuth2Client } = require('google-auth-library');
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 // 1. REGISTER USER
 const register = async (req, res) => {
@@ -62,4 +64,52 @@ const login = async (req, res) => {
     }
 };
 
-module.exports = { register, login };
+// 3. GOOGLE LOGIN/REGISTER
+const googleAuth = async (req, res) => {
+    const { token } = req.body; // Access token from frontend
+
+    try {
+        // Verify the token using Google's UserInfo endpoint
+        const response = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+            headers: { Authorization: `Bearer ${token}` }
+        });
+        const googleUser = await response.json();
+
+        if (!googleUser.email_verified) {
+            return res.status(400).json({ message: 'Google account not verified' });
+        }
+
+        const { email, sub: googleId, name } = googleUser;
+
+        // Check if user exists
+        const userCheck = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+        
+        let userId;
+        
+        if (userCheck.rows.length > 0) {
+            // User exists - update google_id if missing
+            userId = userCheck.rows[0].id;
+            if (!userCheck.rows[0].google_id) {
+                await pool.query('UPDATE users SET google_id = $1 WHERE id = $2', [googleId, userId]);
+            }
+        } else {
+            // Create new user (password is null)
+            const newUser = await pool.query(
+                'INSERT INTO users (email, google_id) VALUES ($1, $2) RETURNING id',
+                [email, googleId]
+            );
+            userId = newUser.rows[0].id;
+        }
+
+        // Generate JWT for your app
+        const appToken = jwt.sign({ id: userId }, process.env.JWT_SECRET, { expiresIn: '1h' });
+
+        res.json({ token: appToken, user: { id: userId, email } });
+
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Google Auth Error');
+    }
+};
+
+module.exports = { register, login, googleAuth };
