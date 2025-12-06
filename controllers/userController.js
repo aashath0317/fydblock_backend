@@ -1,5 +1,6 @@
 // controllers/userController.js
 const pool = require('../db');
+const jwt = require('jsonwebtoken'); // Required for decoding tokens in OAuth flow
 
 // @desc    Get current user profile & bot status
 // @route   GET /api/user/me
@@ -57,23 +58,100 @@ const updateProfile = async (req, res) => {
     }
 };
 
-// @desc    Add Exchange Key (Step 2)
+// @desc    Add Exchange Key (Manual Connection)
 // @route   POST /api/user/exchange
 // @access  Private
 const addExchange = async (req, res) => {
     const { exchange_name, api_key, api_secret } = req.body;
 
     try {
-        // Note: In production, encrypt api_key/secret before saving!
+        // We explicitly set connection_type to 'manual'
+        // SECURITY NOTE: In a real app, you MUST encrypt api_key and api_secret before saving.
         const newExchange = await pool.query(
-            'INSERT INTO user_exchanges (user_id, exchange_name, api_key, api_secret) VALUES ($1, $2, $3, $4) RETURNING *',
-            [req.user.id, exchange_name, api_key, api_secret]
+            'INSERT INTO user_exchanges (user_id, exchange_name, api_key, api_secret, connection_type) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+            [req.user.id, exchange_name, api_key, api_secret, 'manual']
         );
 
         res.json(newExchange.rows[0]);
     } catch (err) {
         console.error(err.message);
         res.status(500).send('Server Error');
+    }
+};
+
+// @desc    Redirect user to Exchange OAuth Page (Fast Connect)
+// @route   GET /api/user/exchange/auth/:exchange
+const authExchange = (req, res) => {
+    const { exchange } = req.params;
+    const { token } = req.query; // Passed from frontend
+
+    // Verify user token from query param since this is a browser redirect
+    let userId;
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        userId = decoded.id;
+    } catch (e) {
+        return res.status(401).send("Unauthorized request");
+    }
+
+    // Define OAuth URLs based on exchange documentation
+    let redirectUrl = "";
+    // Ensure API_BASE_URL is defined in your .env (e.g., http://localhost:5000/api)
+    const callbackUrl = `${process.env.API_BASE_URL}/user/exchange/callback/${exchange}`; 
+
+    if (exchange === 'binance') {
+        const clientId = process.env.BINANCE_OAUTH_CLIENT_ID;
+        redirectUrl = `https://accounts.binance.com/oauth/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(callbackUrl)}&state=${userId}`;
+    } 
+    else if (exchange === 'okx') {
+        const clientId = process.env.OKX_OAUTH_CLIENT_ID;
+        // OKX typically uses this structure, check specific docs for updates
+        redirectUrl = `https://www.okx.com/account/users/authorization?client_id=${clientId}&response_type=code&redirect_uri=${encodeURIComponent(callbackUrl)}&state=${userId}`;
+    }
+    // Add other exchanges (Bybit, Coinbase) logic here as needed
+
+    if (redirectUrl) {
+        res.redirect(redirectUrl);
+    } else {
+        res.status(400).send("Exchange OAuth not supported yet for " + exchange);
+    }
+};
+
+// @desc    Handle callback from Exchange (Fast Connect Return)
+// @route   GET /api/user/exchange/callback/:exchange
+const authExchangeCallback = async (req, res) => {
+    const { exchange } = req.params;
+    const { code, state } = req.query; // 'state' contains the userId we sent earlier
+
+    if (!code || !state) return res.status(400).send("Invalid callback data");
+
+    try {
+        // 1. Exchange 'code' for 'access_token' 
+        // THIS IS MOCK LOGIC. You must implement the specific fetch call for each exchange.
+        // Example for Binance:
+        // const tokenResponse = await fetch('https://accounts.binance.com/oauth/token', { ... });
+        // const { access_token, refresh_token } = await tokenResponse.json();
+        
+        // --- START MOCK DATA ---
+        const access_token = "mock_access_token_" + code.substring(0, 10);
+        const refresh_token = "mock_refresh_token_" + code.substring(0, 10);
+        // --- END MOCK DATA ---
+
+        // 2. Save to Database
+        await pool.query(
+            'INSERT INTO user_exchanges (user_id, exchange_name, access_token, refresh_token, connection_type) VALUES ($1, $2, $3, $4, $5)',
+            [state, exchange, access_token, refresh_token, 'oauth']
+        );
+
+        // 3. Redirect back to your Frontend Bot Builder (Step 3)
+        // Ensure FRONTEND_URL is in your .env (e.g., http://localhost:5173)
+        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+        res.redirect(`${frontendUrl}/bot-builder?step=3`);
+
+    } catch (err) {
+        console.error(err);
+        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+        res.redirect(`${frontendUrl}/bot-builder?error=oauth_failed`);
     }
 };
 
@@ -85,12 +163,12 @@ const createBot = async (req, res) => {
 
     try {
         // 1. Create Subscription
-        const sub = await pool.query(
+        await pool.query(
             'INSERT INTO subscriptions (user_id, plan_type, billing_cycle) VALUES ($1, $2, $3) RETURNING subscription_id',
             [req.user.id, plan, billing_cycle]
         );
 
-        // 2. Get the latest exchange connection for this user (Simplified logic)
+        // 2. Get the latest exchange connection for this user
         const exchange = await pool.query(
             'SELECT exchange_id FROM user_exchanges WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
             [req.user.id]
@@ -111,4 +189,11 @@ const createBot = async (req, res) => {
     }
 };
 
-module.exports = { getMe, updateProfile, addExchange, createBot };
+module.exports = { 
+    getMe, 
+    updateProfile, 
+    addExchange, 
+    createBot, 
+    authExchange, 
+    authExchangeCallback 
+};
