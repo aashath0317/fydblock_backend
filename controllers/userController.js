@@ -115,7 +115,14 @@ const calculateUserTotalValue = async (userId) => {
         return totalValue;
 
     } catch (err) {
-        console.error(`Calc Error User ${userId}:`, err.message);
+        // IMPROVED ERROR HANDLING
+        if (err instanceof ccxt.AuthenticationError) {
+            console.error(`Calc Error User ${userId}: Invalid API Keys`);
+        } else if (err instanceof ccxt.NetworkError) {
+            console.error(`Calc Error User ${userId}: Network Issue`);
+        } else {
+            console.error(`Calc Error User ${userId}:`, err.message);
+        }
         return 0;
     }
 };
@@ -171,6 +178,18 @@ const addExchange = async (req, res) => {
     const { exchange_name, api_key, api_secret, passphrase } = req.body;
 
     try {
+        // Validate keys before saving (Optional but recommended)
+        const exchangeId = exchange_name.toLowerCase();
+        if (ccxt[exchangeId]) {
+            const exchange = new ccxt[exchangeId]({
+                apiKey: api_key,
+                secret: api_secret,
+                password: passphrase
+            });
+            // Try a lightweight public call or balance check to verify
+            // await exchange.fetchBalance(); 
+        }
+
         const encryptedKey = encrypt(api_key);
         const encryptedSecret = encrypt(api_secret);
         const encryptedPassphrase = passphrase ? encrypt(passphrase) : null;
@@ -183,6 +202,7 @@ const addExchange = async (req, res) => {
         res.json(newExchange.rows[0]);
     } catch (err) {
         console.error(err.message);
+        // Handle specific CCXT errors during connection test here if you implemented the check above
         res.status(500).send('Server Error');
     }
 };
@@ -281,6 +301,7 @@ const getDashboard = async (req, res) => {
             [req.user.id]
         );
 
+        // In a real app, you would calculate these from live trading data or DB history
         const dashboardStats = [
             { title: "Today's Profit", value: "$0.00", percentage: "0.00%", isPositive: true },
             { title: "30 Days Profit", value: "$0.00", percentage: "0.00%", isPositive: true },
@@ -297,7 +318,7 @@ const getDashboard = async (req, res) => {
 // @desc    Get Real-Time Portfolio + History
 const getPortfolio = async (req, res) => {
     try {
-        // 1. Get Real-Time Assets (Using the logic derived from calculate helper but returning details)
+        // 1. Get Real-Time Assets
         const keysQuery = await pool.query('SELECT * FROM user_exchanges WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1', [req.user.id]);
         if (keysQuery.rows.length === 0) return res.json({ totalValue: 0, changePercent: 0, assets: [], history: [] });
 
@@ -312,14 +333,28 @@ const getPortfolio = async (req, res) => {
         const exchange = new ccxt[exchangeId]({ apiKey, secret: apiSecret, password, enableRateLimit: true });
         
         let balances = {};
+        
+        // --- IMPROVED ERROR HANDLING FOR PORTFOLIO ---
         try {
             const trading = await exchange.fetchBalance();
             if (trading.total) Object.entries(trading.total).forEach(([s, a]) => { if (a > 0) balances[s] = a; });
+            
             if (exchangeId === 'okx') {
                 const funding = await exchange.fetchBalance({ type: 'funding' });
                 if (funding.total) Object.entries(funding.total).forEach(([s, a]) => { balances[s] = (balances[s] || 0) + a; });
             }
-        } catch (e) { return res.status(500).json({ message: 'Exchange Connect Error' }); }
+        } catch (e) {
+            console.error("Portfolio Fetch Error:", e.message);
+            if (e instanceof ccxt.AuthenticationError) {
+                return res.status(401).json({ message: 'Invalid API Keys. Please check your exchange connection.' });
+            } else if (e instanceof ccxt.NetworkError) {
+                return res.status(503).json({ message: 'Exchange is currently unreachable. Please try again later.' });
+            } else if (e instanceof ccxt.RateLimitExceeded) {
+                 return res.status(429).json({ message: 'Rate limit exceeded. Please try again later.' });
+            }
+            // For other exchange errors, return a generic 500 but log the specific error
+            return res.status(500).json({ message: 'Error fetching portfolio data from exchange.' });
+        }
 
         const assetsList = Object.entries(balances).map(([s, b]) => ({ symbol: s, balance: b }));
         const prices = await fetchTokenPrices(assetsList.map(a => a.symbol));
