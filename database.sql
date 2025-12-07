@@ -29,3 +29,14 @@ CREATE TABLE bots (
     status VARCHAR(20) DEFAULT 'ready',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE user_assets (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id),
+    asset_id VARCHAR(50),  -- e.g., 'bitcoin' (CoinGecko ID)
+    symbol VARCHAR(10),    -- e.g., 'BTC'
+    name VARCHAR(50),      -- e.g., 'Bitcoin'
+    balance DECIMAL(18, 8) DEFAULT 0,
+    icon_url TEXT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
