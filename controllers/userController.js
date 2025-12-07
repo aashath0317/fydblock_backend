@@ -1,9 +1,8 @@
-// backend/controllers/userController.js
 const pool = require('../db');
 const jwt = require('jsonwebtoken');
 const axios = require('axios');
 const ccxt = require('ccxt');
-const { encrypt, decrypt } = require('../utils/encryption'); 
+const { encrypt, decrypt } = require('../utils/encryption');
 
 // --- HELPER: FETCH PRICES ---
 const fetchTokenPrices = async (symbols) => {
@@ -16,7 +15,9 @@ const fetchTokenPrices = async (symbols) => {
         'USDC': 'usd-coin', 'DOT': 'polkadot', 'MATIC': 'matic-network', 'LTC': 'litecoin'
     };
 
-    const assetIds = symbols.map(s => symbolMap[s] || s.toLowerCase()).join(',');
+    // Remove duplicates and map
+    const uniqueSymbols = [...new Set(symbols)];
+    const assetIds = uniqueSymbols.map(s => symbolMap[s] || s.toLowerCase()).join(',');
     
     try {
         const url = `https://api.coingecko.com/api/v3/simple/price?ids=${assetIds}&vs_currencies=usd&include_24hr_change=true`;
@@ -92,16 +93,20 @@ const updateProfile = async (req, res) => {
 // @route   POST /api/user/exchange
 // @access  Private
 const addExchange = async (req, res) => {
-    const { exchange_name, api_key, api_secret } = req.body;
+    // 1. Accept passphrase from the request
+    const { exchange_name, api_key, api_secret, passphrase } = req.body;
 
     try {
-        // Encrypt keys before saving
+        // 2. Encrypt keys
         const encryptedKey = encrypt(api_key);
         const encryptedSecret = encrypt(api_secret);
+        // Encrypt passphrase if it exists (Required for OKX)
+        const encryptedPassphrase = passphrase ? encrypt(passphrase) : null;
 
+        // 3. Save to Database
         const newExchange = await pool.query(
-            'INSERT INTO user_exchanges (user_id, exchange_name, api_key, api_secret, connection_type) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-            [req.user.id, exchange_name, encryptedKey, encryptedSecret, 'manual']
+            'INSERT INTO user_exchanges (user_id, exchange_name, api_key, api_secret, passphrase, connection_type) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+            [req.user.id, exchange_name, encryptedKey, encryptedSecret, encryptedPassphrase, 'manual']
         );
 
         res.json(newExchange.rows[0]);
@@ -179,13 +184,11 @@ const createBot = async (req, res) => {
     const { bot_name, quote_currency, bot_type, plan, billing_cycle } = req.body;
 
     try {
-        // 1. Create Subscription
         await pool.query(
             'INSERT INTO subscriptions (user_id, plan_type, billing_cycle) VALUES ($1, $2, $3) RETURNING subscription_id',
             [req.user.id, plan, billing_cycle]
         );
 
-        // 2. Get the latest exchange connection
         const exchange = await pool.query(
             'SELECT exchange_id FROM user_exchanges WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
             [req.user.id]
@@ -193,7 +196,6 @@ const createBot = async (req, res) => {
         
         const exchangeId = exchange.rows.length > 0 ? exchange.rows[0].exchange_id : null;
 
-        // 3. Create Bot
         const newBot = await pool.query(
             'INSERT INTO bots (user_id, exchange_connection_id, bot_name, quote_currency, bot_type, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
             [req.user.id, exchangeId, bot_name || 'My First Bot', quote_currency, bot_type, 'ready']
@@ -216,7 +218,6 @@ const getDashboard = async (req, res) => {
             [req.user.id]
         );
 
-        // Default stats (will be populated by a background job in a real app)
         const dashboardStats = [
             { title: "Today's Profit", value: "$0.00", percentage: "0.00%", isPositive: true },
             { title: "30 Days Profit", value: "$0.00", percentage: "0.00%", isPositive: true },
@@ -234,12 +235,12 @@ const getDashboard = async (req, res) => {
     }
 };
 
-// @desc    Get Real-Time Portfolio (Balances from Exchange + Prices from CoinGecko)
+// @desc    Get Real-Time Portfolio
 // @route   GET /api/user/portfolio
 // @access  Private
 const getPortfolio = async (req, res) => {
     try {
-        // 1. Get User's Keys
+        // 1. Get Keys
         const keysQuery = await pool.query(
             'SELECT * FROM user_exchanges WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
             [req.user.id]
@@ -252,9 +253,10 @@ const getPortfolio = async (req, res) => {
         const exchangeData = keysQuery.rows[0];
         const exchangeId = exchangeData.exchange_name.toLowerCase(); 
 
-        // 2. Decrypt & Connect
+        // 2. Decrypt Keys & Passphrase
         const apiKey = decrypt(exchangeData.api_key);
         const apiSecret = decrypt(exchangeData.api_secret);
+        const password = exchangeData.passphrase ? decrypt(exchangeData.passphrase) : undefined; // <--- Passphrase for OKX
 
         if (!ccxt[exchangeId]) {
             return res.status(400).json({ message: 'Exchange not supported' });
@@ -263,46 +265,42 @@ const getPortfolio = async (req, res) => {
         const exchange = new ccxt[exchangeId]({
             apiKey: apiKey,
             secret: apiSecret,
+            password: password, // <--- Sent to CCXT
             enableRateLimit: true,
         });
 
-        // 3. FETCH BALANCES (Trading + Funding)
+        // 3. FETCH BALANCES
         let balances = {};
         
         try {
-            // A. Fetch Default (Spot/Trading)
+            // A. Fetch Trading Balance
             const tradingBalance = await exchange.fetchBalance();
-            
-            // Populate initial list from Trading
             if (tradingBalance.total) {
                 for (const [symbol, amount] of Object.entries(tradingBalance.total)) {
                     if (amount > 0) balances[symbol] = amount;
                 }
             }
 
-            // B. OKX SPECIFIC: Fetch Funding Wallet
+            // B. OKX ONLY: Fetch Funding Balance & Merge
             if (exchangeId === 'okx') {
                 try {
                     const fundingBalance = await exchange.fetchBalance({ type: 'funding' });
-                    
                     if (fundingBalance.total) {
                         for (const [symbol, amount] of Object.entries(fundingBalance.total)) {
-                            // Add funding amount to existing trading amount
                             balances[symbol] = (balances[symbol] || 0) + amount;
                         }
                     }
                 } catch (fundErr) {
-                    console.warn("OKX Funding fetch failed (might be empty or permissions):", fundErr.message);
+                    console.warn("OKX Funding fetch failed:", fundErr.message);
                 }
             }
 
         } catch (error) {
             console.error("Exchange API Error:", error.message);
-            // If main fetch fails, return error (likely bad keys or missing passphrase for OKX)
-            return res.status(500).json({ message: 'Failed to connect to exchange. Check API Keys & Permissions.' });
+            return res.status(500).json({ message: 'Failed to connect. Check API Keys & Passphrase.' });
         }
 
-        // 4. Prepare Asset List
+        // 4. Format & Filter
         const assetsList = Object.entries(balances).map(([symbol, balance]) => ({ symbol, balance }));
 
         if (assetsList.length === 0) {
@@ -313,11 +311,10 @@ const getPortfolio = async (req, res) => {
         const symbols = assetsList.map(a => a.symbol);
         const prices = await fetchTokenPrices(symbols);
 
-        // 6. Calculate Totals
+        // 6. Calculate
         let totalValue = 0;
         let previousTotalValue = 0;
-
-        const symbolMap = { 'BTC': 'bitcoin', 'ETH': 'ethereum', 'USDT': 'tether', 'SOL': 'solana', 'BNB': 'binancecoin' }; // Reuse map logic for ID lookup
+        const symbolMap = { 'BTC': 'bitcoin', 'ETH': 'ethereum', 'USDT': 'tether', 'SOL': 'solana', 'BNB': 'binancecoin' };
 
         const enrichedAssets = assetsList.map(asset => {
             const coinId = symbolMap[asset.symbol] || asset.symbol.toLowerCase();
@@ -325,7 +322,6 @@ const getPortfolio = async (req, res) => {
             
             const currentPrice = priceData.usd;
             const change24h = priceData.usd_24h_change || 0;
-            
             const value = asset.balance * currentPrice;
             totalValue += value;
 
@@ -348,12 +344,8 @@ const getPortfolio = async (req, res) => {
             };
         });
 
-        // Filter out tiny dust balances (less than $1) to keep UI clean
         const validAssets = enrichedAssets.filter(a => a.value > 1).sort((a, b) => b.value - a.value);
-
-        const totalChangePercent = previousTotalValue > 0 
-            ? ((totalValue - previousTotalValue) / previousTotalValue) * 100 
-            : 0;
+        const totalChangePercent = previousTotalValue > 0 ? ((totalValue - previousTotalValue) / previousTotalValue) * 100 : 0;
 
         res.json({
             totalValue,
@@ -367,9 +359,6 @@ const getPortfolio = async (req, res) => {
     }
 };
 
-// ❌ OLD INCORRECT IMPORT REMOVED ❌
-
-// ✅ CORRECT EXPORT
 module.exports = { 
     getMe, 
     updateProfile, 
