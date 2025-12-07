@@ -11,6 +11,7 @@ const {
     authExchangeCallback,
     getDashboard,
     getPortfolio 
+    getUserBots
 } = require('../controllers/userController');
 
 const { protect } = require('../middleware/authMiddleware');
@@ -30,5 +31,7 @@ router.get('/portfolio', protect, getPortfolio);
 // --- OAUTH ROUTES ---
 router.get('/exchange/auth/:exchange', authExchange); 
 router.get('/exchange/callback/:exchange', authExchangeCallback);
+
+router.get('/bots', protect, getUserBots);
 
 module.exports = router;
