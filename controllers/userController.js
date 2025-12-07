@@ -5,6 +5,29 @@ const axios = require('axios');
 const ccxt = require('ccxt');
 const { encrypt, decrypt } = require('../utils/encryption'); 
 
+// --- HELPER: FETCH PRICES ---
+const fetchTokenPrices = async (symbols) => {
+    if (symbols.length === 0) return {};
+    
+    // Map common symbols to CoinGecko IDs
+    const symbolMap = {
+        'BTC': 'bitcoin', 'ETH': 'ethereum', 'USDT': 'tether', 'SOL': 'solana',
+        'BNB': 'binancecoin', 'XRP': 'ripple', 'ADA': 'cardano', 'DOGE': 'dogecoin',
+        'USDC': 'usd-coin', 'DOT': 'polkadot', 'MATIC': 'matic-network', 'LTC': 'litecoin'
+    };
+
+    const assetIds = symbols.map(s => symbolMap[s] || s.toLowerCase()).join(',');
+    
+    try {
+        const url = `https://api.coingecko.com/api/v3/simple/price?ids=${assetIds}&vs_currencies=usd&include_24hr_change=true`;
+        const res = await axios.get(url);
+        return res.data;
+    } catch (err) {
+        console.error("CoinGecko Error:", err.message);
+        return {};
+    }
+};
+
 // @desc    Get current user profile, bot status & exchange connection status
 // @route   GET /api/user/me
 // @access  Private
@@ -216,7 +239,7 @@ const getDashboard = async (req, res) => {
 // @access  Private
 const getPortfolio = async (req, res) => {
     try {
-        // 1. Get User's Connected Exchange Keys
+        // 1. Get User's Keys
         const keysQuery = await pool.query(
             'SELECT * FROM user_exchanges WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
             [req.user.id]
@@ -229,13 +252,12 @@ const getPortfolio = async (req, res) => {
         const exchangeData = keysQuery.rows[0];
         const exchangeId = exchangeData.exchange_name.toLowerCase(); 
 
-        // 2. Decrypt Keys
+        // 2. Decrypt & Connect
         const apiKey = decrypt(exchangeData.api_key);
         const apiSecret = decrypt(exchangeData.api_secret);
 
-        // 3. Connect to Exchange using CCXT
         if (!ccxt[exchangeId]) {
-            return res.status(400).json({ message: 'Exchange not supported yet' });
+            return res.status(400).json({ message: 'Exchange not supported' });
         }
 
         const exchange = new ccxt[exchangeId]({
@@ -244,66 +266,75 @@ const getPortfolio = async (req, res) => {
             enableRateLimit: true,
         });
 
-        // 4. Fetch Wallet Balance from Exchange
-        let balances;
+        // 3. FETCH BALANCES (Trading + Funding)
+        let balances = {};
+        
         try {
-            balances = await exchange.fetchBalance();
-        } catch (error) {
-            console.error("Exchange Connection Error:", error.message);
-            return res.status(500).json({ message: 'Failed to fetch balance. Check API keys.' });
-        }
-
-        // 5. Filter for assets with actual balance (> 0)
-        const assets = [];
-        const items = balances.total; 
-
-        for (const [symbol, amount] of Object.entries(items)) {
-            if (amount > 0) {
-                assets.push({ symbol: symbol, balance: amount });
+            // A. Fetch Default (Spot/Trading)
+            const tradingBalance = await exchange.fetchBalance();
+            
+            // Populate initial list from Trading
+            if (tradingBalance.total) {
+                for (const [symbol, amount] of Object.entries(tradingBalance.total)) {
+                    if (amount > 0) balances[symbol] = amount;
+                }
             }
+
+            // B. OKX SPECIFIC: Fetch Funding Wallet
+            if (exchangeId === 'okx') {
+                try {
+                    const fundingBalance = await exchange.fetchBalance({ type: 'funding' });
+                    
+                    if (fundingBalance.total) {
+                        for (const [symbol, amount] of Object.entries(fundingBalance.total)) {
+                            // Add funding amount to existing trading amount
+                            balances[symbol] = (balances[symbol] || 0) + amount;
+                        }
+                    }
+                } catch (fundErr) {
+                    console.warn("OKX Funding fetch failed (might be empty or permissions):", fundErr.message);
+                }
+            }
+
+        } catch (error) {
+            console.error("Exchange API Error:", error.message);
+            // If main fetch fails, return error (likely bad keys or missing passphrase for OKX)
+            return res.status(500).json({ message: 'Failed to connect to exchange. Check API Keys & Permissions.' });
         }
 
-        if (assets.length === 0) {
+        // 4. Prepare Asset List
+        const assetsList = Object.entries(balances).map(([symbol, balance]) => ({ symbol, balance }));
+
+        if (assetsList.length === 0) {
             return res.json({ totalValue: 0, changePercent: 0, assets: [] });
         }
 
-        // 6. Get Live Prices from CoinGecko
-        const symbolMap = {
-            'BTC': 'bitcoin', 'ETH': 'ethereum', 'USDT': 'tether', 'SOL': 'solana',
-            'BNB': 'binancecoin', 'XRP': 'ripple', 'ADA': 'cardano', 'DOGE': 'dogecoin',
-            'USDC': 'usd-coin', 'DOT': 'polkadot'
-        };
+        // 5. Get Prices
+        const symbols = assetsList.map(a => a.symbol);
+        const prices = await fetchTokenPrices(symbols);
 
-        const assetIds = assets.map(a => symbolMap[a.symbol] || a.symbol.toLowerCase()).join(',');
-
-        const priceUrl = `https://api.coingecko.com/api/v3/simple/price?ids=${assetIds}&vs_currencies=usd&include_24hr_change=true`;
-        const priceRes = await axios.get(priceUrl);
-        const prices = priceRes.data;
-
-        // 7. Calculate Totals
+        // 6. Calculate Totals
         let totalValue = 0;
         let previousTotalValue = 0;
 
-        const enrichedAssets = assets.map(asset => {
+        const symbolMap = { 'BTC': 'bitcoin', 'ETH': 'ethereum', 'USDT': 'tether', 'SOL': 'solana', 'BNB': 'binancecoin' }; // Reuse map logic for ID lookup
+
+        const enrichedAssets = assetsList.map(asset => {
             const coinId = symbolMap[asset.symbol] || asset.symbol.toLowerCase();
             const priceData = prices[coinId] || { usd: 0, usd_24h_change: 0 };
             
             const currentPrice = priceData.usd;
-            const change24h = priceData.usd_24h_change;
+            const change24h = priceData.usd_24h_change || 0;
             
             const value = asset.balance * currentPrice;
             totalValue += value;
 
-            // Calc previous value for % change
             if (change24h !== 0) {
                 const prevPrice = currentPrice / (1 + (change24h / 100));
                 previousTotalValue += asset.balance * prevPrice;
             } else {
                 previousTotalValue += value;
             }
-
-            // Generate Icon URL dynamically
-            const icon = `https://cryptologos.cc/logos/${coinId}-${asset.symbol.toLowerCase()}-logo.png`;
 
             return {
                 id: asset.symbol,
@@ -313,9 +344,12 @@ const getPortfolio = async (req, res) => {
                 price: currentPrice,
                 value: value,
                 change: change24h,
-                icon: icon 
+                icon: `https://cryptologos.cc/logos/${coinId}-${asset.symbol.toLowerCase()}-logo.png`
             };
         });
+
+        // Filter out tiny dust balances (less than $1) to keep UI clean
+        const validAssets = enrichedAssets.filter(a => a.value > 1).sort((a, b) => b.value - a.value);
 
         const totalChangePercent = previousTotalValue > 0 
             ? ((totalValue - previousTotalValue) / previousTotalValue) * 100 
@@ -324,16 +358,18 @@ const getPortfolio = async (req, res) => {
         res.json({
             totalValue,
             changePercent: totalChangePercent,
-            assets: enrichedAssets
+            assets: validAssets
         });
 
     } catch (err) {
-        console.error("Portfolio Error:", err);
-        // Return mostly empty if external APIs fail so the UI doesn't crash
-        res.status(500).json({ message: 'Error fetching portfolio data', error: err.message });
+        console.error("Portfolio Controller Error:", err);
+        res.status(500).send('Server Error');
     }
 };
 
+// ❌ OLD INCORRECT IMPORT REMOVED ❌
+
+// ✅ CORRECT EXPORT
 module.exports = { 
     getMe, 
     updateProfile, 
@@ -342,5 +378,5 @@ module.exports = {
     authExchange, 
     authExchangeCallback,
     getDashboard,
-    getPortfolio
+    getPortfolio 
 };
