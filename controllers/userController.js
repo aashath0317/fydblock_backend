@@ -429,6 +429,41 @@ const getPortfolio = async (req, res) => {
     }
 };
 
+// @desc    Get All User Bots with Performance Data (Mocked for UI)
+const getUserBots = async (req, res) => {
+    try {
+        // Fetch real bots from DB
+        const botsQuery = await pool.query(
+            'SELECT * FROM bots WHERE user_id = $1 AND status != \'archived\' ORDER BY created_at DESC',
+            [req.user.id]
+        );
+
+        // Enhance with mock performance data (since we don't have a live trading engine yet)
+        const enrichedBots = botsQuery.rows.map(bot => {
+            // Generate random profit/loss for demo visualization
+            const isPositive = Math.random() > 0.3;
+            const totalProfit = (Math.random() * 5000).toFixed(2);
+            const invested = (Math.random() * 5000 + 1000).toFixed(2);
+
+            // Mock chart data (array of numbers)
+            const chartData = Array.from({ length: 10 }, () => Math.floor(Math.random() * 100));
+
+            return {
+                ...bot,
+                total_profit: isPositive ? totalProfit : -totalProfit,
+                invested_capital: invested,
+                chart_data: chartData,
+                is_running: bot.status === 'running' || bot.status === 'ready'
+            };
+        });
+
+        res.json(enrichedBots);
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+};
+
 module.exports = { 
     getMe, 
     updateProfile, 
@@ -438,5 +473,6 @@ module.exports = {
     authExchangeCallback, 
     getDashboard, 
     getPortfolio, 
-    calculateUserTotalValue // Exported for server.js cron job
+    calculateUserTotalValue,
+    getUserBots 
 };
