@@ -1,41 +1,48 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
+const cron = require('node-cron'); // Import Cron
 const authRoutes = require('./routes/authRoutes');
 const pool = require('./db');
 const userRoutes = require('./routes/userRoutes');
+const { calculateUserTotalValue } = require('./controllers/userController'); // Import helper
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Middleware
-app.use(cors()); // Allows your React app to talk to this backend
-app.use(express.json()); // Allows backend to understand JSON data
+app.use(cors());
+app.use(express.json());
 
-// Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/user', userRoutes);
 
-// Simple test route
-app.get('/', (req, res) => {
-    res.send('FydBlock API is running...');
-});
+app.get('/', (req, res) => res.send('FydBlock API is running...'));
 
-app.get('/test-db', async (req, res) => {
+// --- CRON JOB: Runs Every Hour at Minute 0 ---
+cron.schedule('0 * * * *', async () => {
+    console.log(`[${new Date().toISOString()}] Running Portfolio Snapshot...`);
+    
     try {
-        const result = await pool.query('SELECT NOW()');
-        res.json({
-            message: 'Database Connection Successful!',
-            time: result.rows[0].now
-        });
+        // 1. Get all users who have connected an exchange
+        const users = await pool.query('SELECT DISTINCT user_id FROM user_exchanges');
+        
+        for (const user of users.rows) {
+            // 2. Calculate Value
+            const totalValue = await calculateUserTotalValue(user.user_id);
+            
+            // 3. Save to DB
+            if (totalValue > 0) {
+                await pool.query(
+                    'INSERT INTO portfolio_snapshots (user_id, total_value) VALUES ($1, $2)',
+                    [user.user_id, totalValue]
+                );
+                console.log(`Saved snapshot for User ${user.user_id}: $${totalValue}`);
+            }
+        }
     } catch (err) {
-        console.error(err);
-        res.status(500).json({
-            message: 'Database Connection Failed',
-            error: err.message
-        });
+        console.error('Snapshot Job Error:', err.message);
     }
 });
 
