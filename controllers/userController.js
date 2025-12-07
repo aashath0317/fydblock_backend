@@ -3,33 +3,126 @@ const pool = require('../db');
 const jwt = require('jsonwebtoken');
 const axios = require('axios');
 const ccxt = require('ccxt');
-const { encrypt, decrypt } = require('../utils/encryption'); 
+const { encrypt, decrypt } = require('../utils/encryption');
 
-// --- HELPER: FETCH PRICES ---
+// --- GLOBAL CACHE (For Prices) ---
+let priceCache = { data: {}, lastFetch: 0 };
+
+// --- HELPER: FETCH PRICES WITH CACHING ---
 const fetchTokenPrices = async (symbols) => {
     if (symbols.length === 0) return {};
     
-    // Map common symbols to CoinGecko IDs
+    // 1. Check Cache (1 minute duration)
+    const CACHE_DURATION = 60 * 1000;
+    const now = Date.now();
+
+    if (now - priceCache.lastFetch < CACHE_DURATION && Object.keys(priceCache.data).length > 0) {
+        return priceCache.data;
+    }
+
+    // 2. Comprehensive Map for CoinGecko IDs
     const symbolMap = {
         'BTC': 'bitcoin', 'ETH': 'ethereum', 'USDT': 'tether', 'SOL': 'solana',
         'BNB': 'binancecoin', 'XRP': 'ripple', 'ADA': 'cardano', 'DOGE': 'dogecoin',
-        'USDC': 'usd-coin', 'DOT': 'polkadot', 'MATIC': 'matic-network', 'LTC': 'litecoin'
+        'USDC': 'usd-coin', 'DOT': 'polkadot', 'MATIC': 'matic-network', 'LTC': 'litecoin',
+        'AVAX': 'avalanche-2', 'TRX': 'tron', 'SHIB': 'shiba-inu', 'LINK': 'chainlink',
+        'ATOM': 'cosmos', 'UNI': 'uniswap', 'NEAR': 'near', 'ALGO': 'algorand'
     };
 
     const assetIds = symbols.map(s => symbolMap[s] || s.toLowerCase()).join(',');
-    
+
     try {
         const url = `https://api.coingecko.com/api/v3/simple/price?ids=${assetIds}&vs_currencies=usd&include_24hr_change=true`;
         const res = await axios.get(url);
+        
+        // Update Cache
+        priceCache.data = res.data;
+        priceCache.lastFetch = now;
+        
         return res.data;
     } catch (err) {
         console.error("CoinGecko Error:", err.message);
-        return {};
+        return priceCache.data || {}; // Return stale cache if API fails
     }
 };
 
+// --- HELPER: CALCULATE TOTAL VALUE (Used by Cron & API) ---
+const calculateUserTotalValue = async (userId) => {
+    // 1. Get User Keys
+    const keysQuery = await pool.query(
+        'SELECT * FROM user_exchanges WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
+        [userId]
+    );
+    if (keysQuery.rows.length === 0) return 0;
+
+    const exchangeData = keysQuery.rows[0];
+    const exchangeId = exchangeData.exchange_name.toLowerCase();
+    const apiKey = decrypt(exchangeData.api_key);
+    const apiSecret = decrypt(exchangeData.api_secret);
+    const password = exchangeData.passphrase ? decrypt(exchangeData.passphrase) : undefined;
+
+    if (!ccxt[exchangeId]) return 0;
+
+    const exchange = new ccxt[exchangeId]({
+        apiKey, secret: apiSecret, password, enableRateLimit: true,
+    });
+
+    try {
+        // 2. Fetch Balance
+        const tradingBalance = await exchange.fetchBalance();
+        let balances = {};
+        
+        if (tradingBalance.total) {
+            for (const [symbol, amount] of Object.entries(tradingBalance.total)) {
+                if (amount > 0) balances[symbol] = amount;
+            }
+        }
+
+        // OKX Funding Logic
+        if (exchangeId === 'okx') {
+            try {
+                const fundingBalance = await exchange.fetchBalance({ type: 'funding' });
+                if (fundingBalance.total) {
+                    for (const [symbol, amount] of Object.entries(fundingBalance.total)) {
+                        balances[symbol] = (balances[symbol] || 0) + amount;
+                    }
+                }
+            } catch (e) { /* Ignore funding error */ }
+        }
+
+        const assetsList = Object.entries(balances).map(([symbol, balance]) => ({ symbol, balance }));
+        if (assetsList.length === 0) return 0;
+
+        // 3. Get Prices & Sum
+        const symbols = assetsList.map(a => a.symbol);
+        const prices = await fetchTokenPrices(symbols);
+        let totalValue = 0;
+
+        // Re-declare map here for local usage (or move it to global scope)
+        const symbolMap = { 
+            'BTC': 'bitcoin', 'ETH': 'ethereum', 'USDT': 'tether', 'SOL': 'solana', 
+            'BNB': 'binancecoin', 'XRP': 'ripple', 'ADA': 'cardano', 'DOGE': 'dogecoin',
+            'USDC': 'usd-coin', 'DOT': 'polkadot', 'MATIC': 'matic-network', 'LTC': 'litecoin',
+            'AVAX': 'avalanche-2', 'TRX': 'tron', 'SHIB': 'shiba-inu', 'LINK': 'chainlink'
+        };
+
+        assetsList.forEach(asset => {
+            const coinId = symbolMap[asset.symbol] || asset.symbol.toLowerCase();
+            const priceData = prices[coinId] || { usd: 0 };
+            totalValue += asset.balance * priceData.usd;
+        });
+
+        return totalValue;
+
+    } catch (err) {
+        console.error(`Calc Error User ${userId}:`, err.message);
+        return 0;
+    }
+};
+
+// --- CONTROLLERS ---
+
 // @desc    Get current user profile
-// @route   GET /api/user/me
 const getMe = async (req, res) => {
     try {
         const userQuery = await pool.query(
@@ -59,7 +152,6 @@ const getMe = async (req, res) => {
 };
 
 // @desc    Update User Profile
-// @route   PUT /api/user/profile
 const updateProfile = async (req, res) => {
     const { full_name, country, phone } = req.body;
     try {
@@ -75,19 +167,14 @@ const updateProfile = async (req, res) => {
 };
 
 // @desc    Add Exchange Key (Manual Connection)
-// @route   POST /api/user/exchange
 const addExchange = async (req, res) => {
-    // 1. Accept passphrase from request
     const { exchange_name, api_key, api_secret, passphrase } = req.body;
 
     try {
         const encryptedKey = encrypt(api_key);
         const encryptedSecret = encrypt(api_secret);
-        
-        // 2. Encrypt passphrase (if provided, essential for OKX)
         const encryptedPassphrase = passphrase ? encrypt(passphrase) : null;
 
-        // 3. Insert into DB using the new passphrase column
         const newExchange = await pool.query(
             'INSERT INTO user_exchanges (user_id, exchange_name, api_key, api_secret, passphrase, connection_type) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
             [req.user.id, exchange_name, encryptedKey, encryptedSecret, encryptedPassphrase, 'manual']
@@ -101,7 +188,6 @@ const addExchange = async (req, res) => {
 };
 
 // @desc    Redirect user to Exchange OAuth Page
-// @route   GET /api/user/exchange/auth/:exchange
 const authExchange = (req, res) => {
     const { exchange } = req.params;
     const { token } = req.query;
@@ -133,7 +219,6 @@ const authExchange = (req, res) => {
 };
 
 // @desc    Handle callback from Exchange
-// @route   GET /api/user/exchange/callback/:exchange
 const authExchangeCallback = async (req, res) => {
     const { exchange } = req.params;
     const { code, state } = req.query;
@@ -160,7 +245,6 @@ const authExchangeCallback = async (req, res) => {
 };
 
 // @desc    Create Bot & Subscription
-// @route   POST /api/user/bot
 const createBot = async (req, res) => {
     const { bot_name, quote_currency, bot_type, plan, billing_cycle } = req.body;
 
@@ -190,7 +274,6 @@ const createBot = async (req, res) => {
 };
 
 // @desc    Get Dashboard Data
-// @route   GET /api/user/dashboard
 const getDashboard = async (req, res) => {
     try {
         const botsQuery = await pool.query(
@@ -211,80 +294,47 @@ const getDashboard = async (req, res) => {
     }
 };
 
-// @desc    Get Real-Time Portfolio
-// @route   GET /api/user/portfolio
+// @desc    Get Real-Time Portfolio + History
 const getPortfolio = async (req, res) => {
     try {
-        const keysQuery = await pool.query(
-            'SELECT * FROM user_exchanges WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
-            [req.user.id]
-        );
-
-        if (keysQuery.rows.length === 0) {
-            return res.json({ totalValue: 0, changePercent: 0, assets: [] });
-        }
+        // 1. Get Real-Time Assets (Using the logic derived from calculate helper but returning details)
+        const keysQuery = await pool.query('SELECT * FROM user_exchanges WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1', [req.user.id]);
+        if (keysQuery.rows.length === 0) return res.json({ totalValue: 0, changePercent: 0, assets: [], history: [] });
 
         const exchangeData = keysQuery.rows[0];
-        const exchangeId = exchangeData.exchange_name.toLowerCase(); 
-
+        const exchangeId = exchangeData.exchange_name.toLowerCase();
         const apiKey = decrypt(exchangeData.api_key);
         const apiSecret = decrypt(exchangeData.api_secret);
-        
-        // 4. Decrypt Passphrase if it exists (Fix for OKX error)
         const password = exchangeData.passphrase ? decrypt(exchangeData.passphrase) : undefined;
 
-        if (!ccxt[exchangeId]) {
-            return res.status(400).json({ message: 'Exchange not supported' });
-        }
+        if (!ccxt[exchangeId]) return res.status(400).json({ message: 'Exchange not supported' });
 
-        // 5. Connect to Exchange with ALL credentials
-        const exchange = new ccxt[exchangeId]({
-            apiKey: apiKey,
-            secret: apiSecret,
-            password: password, // CCXT uses 'password' for the passphrase
-            enableRateLimit: true,
-        });
-
-        let balances = {};
+        const exchange = new ccxt[exchangeId]({ apiKey, secret: apiSecret, password, enableRateLimit: true });
         
+        let balances = {};
         try {
-            const tradingBalance = await exchange.fetchBalance();
-            if (tradingBalance.total) {
-                for (const [symbol, amount] of Object.entries(tradingBalance.total)) {
-                    if (amount > 0) balances[symbol] = amount;
-                }
-            }
-
+            const trading = await exchange.fetchBalance();
+            if (trading.total) Object.entries(trading.total).forEach(([s, a]) => { if (a > 0) balances[s] = a; });
             if (exchangeId === 'okx') {
-                try {
-                    const fundingBalance = await exchange.fetchBalance({ type: 'funding' });
-                    if (fundingBalance.total) {
-                        for (const [symbol, amount] of Object.entries(fundingBalance.total)) {
-                            balances[symbol] = (balances[symbol] || 0) + amount;
-                        }
-                    }
-                } catch (fundErr) {
-                    console.warn("OKX Funding fetch failed:", fundErr.message);
-                }
+                const funding = await exchange.fetchBalance({ type: 'funding' });
+                if (funding.total) Object.entries(funding.total).forEach(([s, a]) => { balances[s] = (balances[s] || 0) + a; });
             }
+        } catch (e) { return res.status(500).json({ message: 'Exchange Connect Error' }); }
 
-        } catch (error) {
-            console.error("Exchange API Error:", error.message);
-            // Return empty portfolio instead of crashing
-            return res.json({ totalValue: 0, changePercent: 0, assets: [] });
-        }
-
-        const assetsList = Object.entries(balances).map(([symbol, balance]) => ({ symbol, balance }));
-        if (assetsList.length === 0) {
-            return res.json({ totalValue: 0, changePercent: 0, assets: [] });
-        }
-
-        const symbols = assetsList.map(a => a.symbol);
-        const prices = await fetchTokenPrices(symbols);
+        const assetsList = Object.entries(balances).map(([s, b]) => ({ symbol: s, balance: b }));
+        const prices = await fetchTokenPrices(assetsList.map(a => a.symbol));
 
         let totalValue = 0;
         let previousTotalValue = 0;
-        const symbolMap = { 'BTC': 'bitcoin', 'ETH': 'ethereum', 'USDT': 'tether', 'SOL': 'solana', 'BNB': 'binancecoin' };
+        
+        // Full Symbol Map for Portfolio
+        const symbolMap = { 
+            'BTC': 'bitcoin', 'ETH': 'ethereum', 'USDT': 'tether', 'SOL': 'solana', 
+            'BNB': 'binancecoin', 'XRP': 'ripple', 'ADA': 'cardano', 'DOGE': 'dogecoin',
+            'USDC': 'usd-coin', 'DOT': 'polkadot', 'MATIC': 'matic-network', 'LTC': 'litecoin',
+            'AVAX': 'avalanche-2', 'TRX': 'tron', 'SHIB': 'shiba-inu', 'LINK': 'chainlink',
+            'ATOM': 'cosmos', 'UNI': 'uniswap'
+        };
 
         const enrichedAssets = assetsList.map(asset => {
             const coinId = symbolMap[asset.symbol] || asset.symbol.toLowerCase();
@@ -292,41 +342,54 @@ const getPortfolio = async (req, res) => {
             
             const currentPrice = priceData.usd;
             const change24h = priceData.usd_24h_change || 0;
-            const value = asset.balance * currentPrice;
+            const val = asset.balance * currentPrice;
             
-            totalValue += value;
+            totalValue += val;
+            
             if (change24h !== 0) {
                 const prevPrice = currentPrice / (1 + (change24h / 100));
                 previousTotalValue += asset.balance * prevPrice;
             } else {
-                previousTotalValue += value;
+                previousTotalValue += val;
             }
 
             return {
-                id: asset.symbol,
-                name: asset.symbol, 
-                symbol: asset.symbol,
-                balance: asset.balance,
-                price: currentPrice,
-                value: value,
+                id: asset.symbol, symbol: asset.symbol, name: asset.symbol,
+                balance: asset.balance, price: currentPrice, value: val,
                 change: change24h,
                 icon: `https://cryptologos.cc/logos/${coinId}-${asset.symbol.toLowerCase()}-logo.png`
             };
-        });
+        }).filter(a => a.value > 1).sort((a, b) => b.value - a.value);
 
-        const validAssets = enrichedAssets.filter(a => a.value > 1).sort((a, b) => b.value - a.value);
-        const totalChangePercent = previousTotalValue > 0 
-            ? ((totalValue - previousTotalValue) / previousTotalValue) * 100 
-            : 0;
+        const changePercent = previousTotalValue > 0 ? ((totalValue - previousTotalValue) / previousTotalValue) * 100 : 0;
+
+        // 2. FETCH HISTORY FROM DATABASE (The 24h Chart)
+        const historyQuery = await pool.query(
+            `SELECT total_value FROM portfolio_snapshots 
+             WHERE user_id = $1 AND recorded_at >= NOW() - INTERVAL '24 HOURS' 
+             ORDER BY recorded_at ASC`,
+            [req.user.id]
+        );
+
+        let history = historyQuery.rows.map(r => parseFloat(r.total_value));
+
+        // If no history exists yet (new user), use current value as a starting point
+        if (history.length === 0) {
+            history = [totalValue]; 
+        } else {
+            // Append current real-time value to the end of the chart for the "live" feel
+            history.push(totalValue);
+        }
 
         res.json({
             totalValue,
-            changePercent: totalChangePercent,
-            assets: validAssets
+            changePercent,
+            assets: enrichedAssets,
+            history: history // Chart data
         });
 
     } catch (err) {
-        console.error("Portfolio Controller Error:", err);
+        console.error(err);
         res.status(500).send('Server Error');
     }
 };
@@ -337,7 +400,8 @@ module.exports = {
     addExchange, 
     createBot, 
     authExchange, 
-    authExchangeCallback,
-    getDashboard,
-    getPortfolio 
+    authExchangeCallback, 
+    getDashboard, 
+    getPortfolio, 
+    calculateUserTotalValue // Exported for server.js cron job
 };
