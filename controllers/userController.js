@@ -1,80 +1,13 @@
 // backend/controllers/userController.js
 const pool = require('../db');
 const jwt = require('jsonwebtoken');
-const { encrypt } = require('../utils/encryption');
 const axios = require('axios');
+const ccxt = require('ccxt');
+const { encrypt, decrypt } = require('../utils/encryption'); 
 
-// @desc    Get current user profile & bot status
+// @desc    Get current user profile, bot status & exchange connection status
 // @route   GET /api/user/me
 // @access  Private
-const getPortfolio = async (req, res) => {
-    try {
-        // 1. Get User's Assets from DB
-        const assetsQuery = await pool.query(
-            'SELECT * FROM user_assets WHERE user_id = $1',
-            [req.user.id]
-        );
-        
-        const assets = assetsQuery.rows;
-
-        if (assets.length === 0) {
-            return res.json({ totalValue: 0, changePercent: 0, assets: [] });
-        }
-
-        // 2. Prepare IDs for CoinGecko API (e.g., "bitcoin,ethereum,solana")
-        const assetIds = assets.map(a => a.asset_id).join(',');
-
-        // 3. Fetch Live Data from CoinGecko
-        const url = `https://api.coingecko.com/api/v3/simple/price?ids=${assetIds}&vs_currencies=usd&include_24hr_change=true`;
-        
-        const marketRes = await axios.get(url);
-        const marketData = marketRes.data;
-
-        // 4. Merge DB Data with Live Market Data
-        let totalValue = 0;
-        let previousTotalValue = 0;
-
-        const enrichedAssets = assets.map(asset => {
-            const liveInfo = marketData[asset.asset_id] || { usd: 0, usd_24h_change: 0 };
-            const currentPrice = liveInfo.usd;
-            const change24h = liveInfo.usd_24h_change;
-            
-            const assetValue = parseFloat(asset.balance) * currentPrice;
-            totalValue += assetValue;
-
-            // Calculate "Previous" value to determine total portfolio change %
-            const prevPrice = currentPrice / (1 + (change24h / 100));
-            previousTotalValue += parseFloat(asset.balance) * prevPrice;
-
-            return {
-                id: asset.asset_id,
-                name: asset.name,
-                symbol: asset.symbol,
-                icon: asset.icon_url,
-                balance: parseFloat(asset.balance),
-                price: currentPrice,
-                change: change24h
-            };
-        });
-
-        // Calculate Total Portfolio Change %
-        const totalChangePercent = previousTotalValue > 0 
-            ? ((totalValue - previousTotalValue) / previousTotalValue) * 100 
-            : 0;
-
-        res.json({
-            totalValue: totalValue,
-            changePercent: totalChangePercent,
-            assets: enrichedAssets
-        });
-
-    } catch (err) {
-        console.error("Portfolio Error:", err.message);
-        // Fallback if CoinGecko fails (Rate limits etc)
-        res.status(500).json({ message: 'Error fetching market data' });
-    }
-};
-
 const getMe = async (req, res) => {
     try {
         const userQuery = await pool.query(
@@ -94,7 +27,7 @@ const getMe = async (req, res) => {
             [req.user.id]
         );
 
-        // [NEW] Check if user has connected an exchange
+        // Check if user has connected an exchange
         const exchangeQuery = await pool.query(
             'SELECT 1 FROM user_exchanges WHERE user_id = $1 LIMIT 1',
             [req.user.id]
@@ -104,7 +37,7 @@ const getMe = async (req, res) => {
             user: user,
             profileComplete: !!user.full_name,
             botCreated: botQuery.rows.length > 0,
-            hasExchange: exchangeQuery.rows.length > 0 // <--- Sending this to frontend
+            hasExchange: exchangeQuery.rows.length > 0
         });
 
     } catch (err) {
@@ -112,6 +45,7 @@ const getMe = async (req, res) => {
         res.status(500).send('Server Error');
     }
 };
+
 // @desc    Update User Profile
 // @route   PUT /api/user/profile
 // @access  Private
@@ -138,7 +72,7 @@ const addExchange = async (req, res) => {
     const { exchange_name, api_key, api_secret } = req.body;
 
     try {
-        // SECURITY FIX: Encrypt keys before saving
+        // Encrypt keys before saving
         const encryptedKey = encrypt(api_key);
         const encryptedSecret = encrypt(api_secret);
 
@@ -254,33 +188,16 @@ const createBot = async (req, res) => {
 // @access  Private
 const getDashboard = async (req, res) => {
     try {
-        // 1. Fetch User's Real Bots
         const botsQuery = await pool.query(
             'SELECT * FROM bots WHERE user_id = $1 ORDER BY created_at DESC',
             [req.user.id]
         );
 
-        // 2. DATA FIX: Send Zeros instead of Mock Data
-        // This ensures the frontend shows "$0.00" until the trading engine runs.
+        // Default stats (will be populated by a background job in a real app)
         const dashboardStats = [
-            { 
-                title: "Today's Profit", 
-                value: "$0.00", 
-                percentage: "0.00%", 
-                isPositive: true 
-            },
-            { 
-                title: "30 Days Profit", 
-                value: "$0.00", 
-                percentage: "0.00%", 
-                isPositive: true 
-            },
-            { 
-                title: "Assets Value", 
-                value: "$0.00", 
-                percentage: "0.00%", 
-                isPositive: true 
-            },
+            { title: "Today's Profit", value: "$0.00", percentage: "0.00%", isPositive: true },
+            { title: "30 Days Profit", value: "$0.00", percentage: "0.00%", isPositive: true },
+            { title: "Assets Value", value: "$0.00", percentage: "0.00%", isPositive: true },
         ];
 
         res.json({
@@ -294,6 +211,129 @@ const getDashboard = async (req, res) => {
     }
 };
 
+// @desc    Get Real-Time Portfolio (Balances from Exchange + Prices from CoinGecko)
+// @route   GET /api/user/portfolio
+// @access  Private
+const getPortfolio = async (req, res) => {
+    try {
+        // 1. Get User's Connected Exchange Keys
+        const keysQuery = await pool.query(
+            'SELECT * FROM user_exchanges WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
+            [req.user.id]
+        );
+
+        if (keysQuery.rows.length === 0) {
+            return res.json({ totalValue: 0, changePercent: 0, assets: [] });
+        }
+
+        const exchangeData = keysQuery.rows[0];
+        const exchangeId = exchangeData.exchange_name.toLowerCase(); 
+
+        // 2. Decrypt Keys
+        const apiKey = decrypt(exchangeData.api_key);
+        const apiSecret = decrypt(exchangeData.api_secret);
+
+        // 3. Connect to Exchange using CCXT
+        if (!ccxt[exchangeId]) {
+            return res.status(400).json({ message: 'Exchange not supported yet' });
+        }
+
+        const exchange = new ccxt[exchangeId]({
+            apiKey: apiKey,
+            secret: apiSecret,
+            enableRateLimit: true,
+        });
+
+        // 4. Fetch Wallet Balance from Exchange
+        let balances;
+        try {
+            balances = await exchange.fetchBalance();
+        } catch (error) {
+            console.error("Exchange Connection Error:", error.message);
+            return res.status(500).json({ message: 'Failed to fetch balance. Check API keys.' });
+        }
+
+        // 5. Filter for assets with actual balance (> 0)
+        const assets = [];
+        const items = balances.total; 
+
+        for (const [symbol, amount] of Object.entries(items)) {
+            if (amount > 0) {
+                assets.push({ symbol: symbol, balance: amount });
+            }
+        }
+
+        if (assets.length === 0) {
+            return res.json({ totalValue: 0, changePercent: 0, assets: [] });
+        }
+
+        // 6. Get Live Prices from CoinGecko
+        const symbolMap = {
+            'BTC': 'bitcoin', 'ETH': 'ethereum', 'USDT': 'tether', 'SOL': 'solana',
+            'BNB': 'binancecoin', 'XRP': 'ripple', 'ADA': 'cardano', 'DOGE': 'dogecoin',
+            'USDC': 'usd-coin', 'DOT': 'polkadot'
+        };
+
+        const assetIds = assets.map(a => symbolMap[a.symbol] || a.symbol.toLowerCase()).join(',');
+
+        const priceUrl = `https://api.coingecko.com/api/v3/simple/price?ids=${assetIds}&vs_currencies=usd&include_24hr_change=true`;
+        const priceRes = await axios.get(priceUrl);
+        const prices = priceRes.data;
+
+        // 7. Calculate Totals
+        let totalValue = 0;
+        let previousTotalValue = 0;
+
+        const enrichedAssets = assets.map(asset => {
+            const coinId = symbolMap[asset.symbol] || asset.symbol.toLowerCase();
+            const priceData = prices[coinId] || { usd: 0, usd_24h_change: 0 };
+            
+            const currentPrice = priceData.usd;
+            const change24h = priceData.usd_24h_change;
+            
+            const value = asset.balance * currentPrice;
+            totalValue += value;
+
+            // Calc previous value for % change
+            if (change24h !== 0) {
+                const prevPrice = currentPrice / (1 + (change24h / 100));
+                previousTotalValue += asset.balance * prevPrice;
+            } else {
+                previousTotalValue += value;
+            }
+
+            // Generate Icon URL dynamically
+            const icon = `https://cryptologos.cc/logos/${coinId}-${asset.symbol.toLowerCase()}-logo.png`;
+
+            return {
+                id: asset.symbol,
+                name: asset.symbol, 
+                symbol: asset.symbol,
+                balance: asset.balance,
+                price: currentPrice,
+                value: value,
+                change: change24h,
+                icon: icon 
+            };
+        });
+
+        const totalChangePercent = previousTotalValue > 0 
+            ? ((totalValue - previousTotalValue) / previousTotalValue) * 100 
+            : 0;
+
+        res.json({
+            totalValue,
+            changePercent: totalChangePercent,
+            assets: enrichedAssets
+        });
+
+    } catch (err) {
+        console.error("Portfolio Error:", err);
+        // Return mostly empty if external APIs fail so the UI doesn't crash
+        res.status(500).json({ message: 'Error fetching portfolio data', error: err.message });
+    }
+};
+
 module.exports = { 
     getMe, 
     updateProfile, 
@@ -301,6 +341,6 @@ module.exports = {
     createBot, 
     authExchange, 
     authExchangeCallback,
-    getDashboard
+    getDashboard,
     getPortfolio
 };
