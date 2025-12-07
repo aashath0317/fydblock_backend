@@ -1,7 +1,7 @@
 // routes/userRoutes.js
 const router = require('express').Router();
 
-// 1. Import 'getDashboard' from the controller
+// Import all controllers in one go
 const { 
     getMe, 
     updateProfile, 
@@ -9,18 +9,23 @@ const {
     createBot, 
     authExchange, 
     authExchangeCallback,
-    getDashboard
+    getDashboard,
+    getPortfolio 
 } = require('../controllers/userController');
 
 const { protect } = require('../middleware/authMiddleware');
 
+// User Profile Routes
 router.get('/me', protect, getMe);
 router.put('/profile', protect, updateProfile);
+
+// Exchange & Bot Routes
 router.post('/exchange', protect, addExchange);
 router.post('/bot', protect, createBot);
 
-// 2. Add the Dashboard Route
+// Dashboard & Portfolio Routes
 router.get('/dashboard', protect, getDashboard);
+router.get('/portfolio', protect, getPortfolio); 
 
 // --- OAUTH ROUTES ---
 router.get('/exchange/auth/:exchange', authExchange); 
