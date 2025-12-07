@@ -1,7 +1,7 @@
 // backend/controllers/userController.js
 const pool = require('../db');
 const jwt = require('jsonwebtoken');
-const { encrypt } = require('../utils/encryption'); // Import encryption helper
+const { encrypt } = require('../utils/encryption');
 
 // @desc    Get current user profile & bot status
 // @route   GET /api/user/me
@@ -19,16 +19,23 @@ const getMe = async (req, res) => {
 
         const user = userQuery.rows[0];
 
-        // Check if user has already created a bot
+        // Check if user has bots
         const botQuery = await pool.query(
             'SELECT * FROM bots WHERE user_id = $1',
+            [req.user.id]
+        );
+
+        // [NEW] Check if user has connected an exchange
+        const exchangeQuery = await pool.query(
+            'SELECT 1 FROM user_exchanges WHERE user_id = $1 LIMIT 1',
             [req.user.id]
         );
 
         res.json({
             user: user,
             profileComplete: !!user.full_name,
-            botCreated: botQuery.rows.length > 0
+            botCreated: botQuery.rows.length > 0,
+            hasExchange: exchangeQuery.rows.length > 0 // <--- Sending this to frontend
         });
 
     } catch (err) {
@@ -36,7 +43,6 @@ const getMe = async (req, res) => {
         res.status(500).send('Server Error');
     }
 };
-
 // @desc    Update User Profile
 // @route   PUT /api/user/profile
 // @access  Private
