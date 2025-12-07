@@ -2,10 +2,79 @@
 const pool = require('../db');
 const jwt = require('jsonwebtoken');
 const { encrypt } = require('../utils/encryption');
+const axios = require('axios');
 
 // @desc    Get current user profile & bot status
 // @route   GET /api/user/me
 // @access  Private
+const getPortfolio = async (req, res) => {
+    try {
+        // 1. Get User's Assets from DB
+        const assetsQuery = await pool.query(
+            'SELECT * FROM user_assets WHERE user_id = $1',
+            [req.user.id]
+        );
+        
+        const assets = assetsQuery.rows;
+
+        if (assets.length === 0) {
+            return res.json({ totalValue: 0, changePercent: 0, assets: [] });
+        }
+
+        // 2. Prepare IDs for CoinGecko API (e.g., "bitcoin,ethereum,solana")
+        const assetIds = assets.map(a => a.asset_id).join(',');
+
+        // 3. Fetch Live Data from CoinGecko
+        const url = `https://api.coingecko.com/api/v3/simple/price?ids=${assetIds}&vs_currencies=usd&include_24hr_change=true`;
+        
+        const marketRes = await axios.get(url);
+        const marketData = marketRes.data;
+
+        // 4. Merge DB Data with Live Market Data
+        let totalValue = 0;
+        let previousTotalValue = 0;
+
+        const enrichedAssets = assets.map(asset => {
+            const liveInfo = marketData[asset.asset_id] || { usd: 0, usd_24h_change: 0 };
+            const currentPrice = liveInfo.usd;
+            const change24h = liveInfo.usd_24h_change;
+            
+            const assetValue = parseFloat(asset.balance) * currentPrice;
+            totalValue += assetValue;
+
+            // Calculate "Previous" value to determine total portfolio change %
+            const prevPrice = currentPrice / (1 + (change24h / 100));
+            previousTotalValue += parseFloat(asset.balance) * prevPrice;
+
+            return {
+                id: asset.asset_id,
+                name: asset.name,
+                symbol: asset.symbol,
+                icon: asset.icon_url,
+                balance: parseFloat(asset.balance),
+                price: currentPrice,
+                change: change24h
+            };
+        });
+
+        // Calculate Total Portfolio Change %
+        const totalChangePercent = previousTotalValue > 0 
+            ? ((totalValue - previousTotalValue) / previousTotalValue) * 100 
+            : 0;
+
+        res.json({
+            totalValue: totalValue,
+            changePercent: totalChangePercent,
+            assets: enrichedAssets
+        });
+
+    } catch (err) {
+        console.error("Portfolio Error:", err.message);
+        // Fallback if CoinGecko fails (Rate limits etc)
+        res.status(500).json({ message: 'Error fetching market data' });
+    }
+};
+
 const getMe = async (req, res) => {
     try {
         const userQuery = await pool.query(
@@ -233,4 +302,5 @@ module.exports = {
     authExchange, 
     authExchangeCallback,
     getDashboard
+    getPortfolio
 };
