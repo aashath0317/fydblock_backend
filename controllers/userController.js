@@ -1,6 +1,8 @@
 // controllers/userController.js
 const pool = require('../db');
 const jwt = require('jsonwebtoken'); // Required for decoding tokens in OAuth flow
+// 1. Import the encryption helper we created
+const { encrypt } = require('../utils/encryption'); 
 
 // @desc    Get current user profile & bot status
 // @route   GET /api/user/me
@@ -20,6 +22,7 @@ const getMe = async (req, res) => {
         const user = userQuery.rows[0];
 
         // Check if user has already created a bot
+        // Note: Ensure the 'bots' table exists in your DB as per the schema I provided earlier
         const botQuery = await pool.query(
             'SELECT * FROM bots WHERE user_id = $1',
             [req.user.id]
@@ -65,11 +68,15 @@ const addExchange = async (req, res) => {
     const { exchange_name, api_key, api_secret } = req.body;
 
     try {
+        // 2. SECURITY FIX: Encrypt keys before saving
+        // Never store these in plain text!
+        const encryptedKey = encrypt(api_key);
+        const encryptedSecret = encrypt(api_secret);
+
         // We explicitly set connection_type to 'manual'
-        // SECURITY NOTE: In a real app, you MUST encrypt api_key and api_secret before saving.
         const newExchange = await pool.query(
             'INSERT INTO user_exchanges (user_id, exchange_name, api_key, api_secret, connection_type) VALUES ($1, $2, $3, $4, $5) RETURNING *',
-            [req.user.id, exchange_name, api_key, api_secret, 'manual']
+            [req.user.id, exchange_name, encryptedKey, encryptedSecret, 'manual']
         );
 
         res.json(newExchange.rows[0]);
@@ -138,6 +145,7 @@ const authExchangeCallback = async (req, res) => {
         // --- END MOCK DATA ---
 
         // 2. Save to Database
+        // Note: Ideally, you should encrypt access/refresh tokens too if they grant fund access
         await pool.query(
             'INSERT INTO user_exchanges (user_id, exchange_name, access_token, refresh_token, connection_type) VALUES ($1, $2, $3, $4, $5)',
             [state, exchange, access_token, refresh_token, 'oauth']
@@ -163,6 +171,7 @@ const createBot = async (req, res) => {
 
     try {
         // 1. Create Subscription
+        // Note: Ensure the 'subscriptions' table exists
         await pool.query(
             'INSERT INTO subscriptions (user_id, plan_type, billing_cycle) VALUES ($1, $2, $3) RETURNING subscription_id',
             [req.user.id, plan, billing_cycle]
@@ -177,6 +186,7 @@ const createBot = async (req, res) => {
         const exchangeId = exchange.rows.length > 0 ? exchange.rows[0].exchange_id : null;
 
         // 3. Create Bot
+        // Note: Ensure the 'bots' table exists
         const newBot = await pool.query(
             'INSERT INTO bots (user_id, exchange_connection_id, bot_name, quote_currency, bot_type, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
             [req.user.id, exchangeId, bot_name || 'My First Bot', quote_currency, bot_type, 'ready']
