@@ -1,15 +1,13 @@
-// controllers/userController.js
+// backend/controllers/userController.js
 const pool = require('../db');
-const jwt = require('jsonwebtoken'); // Required for decoding tokens in OAuth flow
-// 1. Import the encryption helper we created
-const { encrypt } = require('../utils/encryption'); 
+const jwt = require('jsonwebtoken');
+const { encrypt } = require('../utils/encryption'); // Import encryption helper
 
 // @desc    Get current user profile & bot status
 // @route   GET /api/user/me
 // @access  Private
 const getMe = async (req, res) => {
     try {
-        // Get user profile
         const userQuery = await pool.query(
             'SELECT id, email, full_name, country, phone_number FROM users WHERE id = $1',
             [req.user.id]
@@ -22,7 +20,6 @@ const getMe = async (req, res) => {
         const user = userQuery.rows[0];
 
         // Check if user has already created a bot
-        // Note: Ensure the 'bots' table exists in your DB as per the schema I provided earlier
         const botQuery = await pool.query(
             'SELECT * FROM bots WHERE user_id = $1',
             [req.user.id]
@@ -30,10 +27,8 @@ const getMe = async (req, res) => {
 
         res.json({
             user: user,
-            // Logic: Profile is "complete" if full_name is set
-            profileComplete: !!user.full_name, 
-            // Logic: Bot is created if a record exists
-            botCreated: botQuery.rows.length > 0 
+            profileComplete: !!user.full_name,
+            botCreated: botQuery.rows.length > 0
         });
 
     } catch (err) {
@@ -42,7 +37,7 @@ const getMe = async (req, res) => {
     }
 };
 
-// @desc    Update User Profile (Step 1)
+// @desc    Update User Profile
 // @route   PUT /api/user/profile
 // @access  Private
 const updateProfile = async (req, res) => {
@@ -68,12 +63,10 @@ const addExchange = async (req, res) => {
     const { exchange_name, api_key, api_secret } = req.body;
 
     try {
-        // 2. SECURITY FIX: Encrypt keys before saving
-        // Never store these in plain text!
+        // SECURITY FIX: Encrypt keys before saving
         const encryptedKey = encrypt(api_key);
         const encryptedSecret = encrypt(api_secret);
 
-        // We explicitly set connection_type to 'manual'
         const newExchange = await pool.query(
             'INSERT INTO user_exchanges (user_id, exchange_name, api_key, api_secret, connection_type) VALUES ($1, $2, $3, $4, $5) RETURNING *',
             [req.user.id, exchange_name, encryptedKey, encryptedSecret, 'manual']
@@ -86,13 +79,12 @@ const addExchange = async (req, res) => {
     }
 };
 
-// @desc    Redirect user to Exchange OAuth Page (Fast Connect)
+// @desc    Redirect user to Exchange OAuth Page
 // @route   GET /api/user/exchange/auth/:exchange
 const authExchange = (req, res) => {
     const { exchange } = req.params;
-    const { token } = req.query; // Passed from frontend
+    const { token } = req.query;
 
-    // Verify user token from query param since this is a browser redirect
     let userId;
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
@@ -101,10 +93,8 @@ const authExchange = (req, res) => {
         return res.status(401).send("Unauthorized request");
     }
 
-    // Define OAuth URLs based on exchange documentation
+    const callbackUrl = `${process.env.API_BASE_URL}/user/exchange/callback/${exchange}`;
     let redirectUrl = "";
-    // Ensure API_BASE_URL is defined in your .env (e.g., http://localhost:5000/api)
-    const callbackUrl = `${process.env.API_BASE_URL}/user/exchange/callback/${exchange}`; 
 
     if (exchange === 'binance') {
         const clientId = process.env.BINANCE_OAUTH_CLIENT_ID;
@@ -112,10 +102,8 @@ const authExchange = (req, res) => {
     } 
     else if (exchange === 'okx') {
         const clientId = process.env.OKX_OAUTH_CLIENT_ID;
-        // OKX typically uses this structure, check specific docs for updates
         redirectUrl = `https://www.okx.com/account/users/authorization?client_id=${clientId}&response_type=code&redirect_uri=${encodeURIComponent(callbackUrl)}&state=${userId}`;
     }
-    // Add other exchanges (Bybit, Coinbase) logic here as needed
 
     if (redirectUrl) {
         res.redirect(redirectUrl);
@@ -124,35 +112,24 @@ const authExchange = (req, res) => {
     }
 };
 
-// @desc    Handle callback from Exchange (Fast Connect Return)
+// @desc    Handle callback from Exchange
 // @route   GET /api/user/exchange/callback/:exchange
 const authExchangeCallback = async (req, res) => {
     const { exchange } = req.params;
-    const { code, state } = req.query; // 'state' contains the userId we sent earlier
+    const { code, state } = req.query;
 
     if (!code || !state) return res.status(400).send("Invalid callback data");
 
     try {
-        // 1. Exchange 'code' for 'access_token' 
-        // THIS IS MOCK LOGIC. You must implement the specific fetch call for each exchange.
-        // Example for Binance:
-        // const tokenResponse = await fetch('https://accounts.binance.com/oauth/token', { ... });
-        // const { access_token, refresh_token } = await tokenResponse.json();
-        
-        // --- START MOCK DATA ---
+        // MOCK OAUTH LOGIC (Replace with real token fetch in production)
         const access_token = "mock_access_token_" + code.substring(0, 10);
         const refresh_token = "mock_refresh_token_" + code.substring(0, 10);
-        // --- END MOCK DATA ---
 
-        // 2. Save to Database
-        // Note: Ideally, you should encrypt access/refresh tokens too if they grant fund access
         await pool.query(
             'INSERT INTO user_exchanges (user_id, exchange_name, access_token, refresh_token, connection_type) VALUES ($1, $2, $3, $4, $5)',
             [state, exchange, access_token, refresh_token, 'oauth']
         );
 
-        // 3. Redirect back to your Frontend Bot Builder (Step 3)
-        // Ensure FRONTEND_URL is in your .env (e.g., http://localhost:5173)
         const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
         res.redirect(`${frontendUrl}/bot-builder?step=3`);
 
@@ -163,7 +140,7 @@ const authExchangeCallback = async (req, res) => {
     }
 };
 
-// @desc    Create Bot & Subscription (Step 4 & 5)
+// @desc    Create Bot & Subscription
 // @route   POST /api/user/bot
 // @access  Private
 const createBot = async (req, res) => {
@@ -171,13 +148,12 @@ const createBot = async (req, res) => {
 
     try {
         // 1. Create Subscription
-        // Note: Ensure the 'subscriptions' table exists
         await pool.query(
             'INSERT INTO subscriptions (user_id, plan_type, billing_cycle) VALUES ($1, $2, $3) RETURNING subscription_id',
             [req.user.id, plan, billing_cycle]
         );
 
-        // 2. Get the latest exchange connection for this user
+        // 2. Get the latest exchange connection
         const exchange = await pool.query(
             'SELECT exchange_id FROM user_exchanges WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
             [req.user.id]
@@ -186,7 +162,6 @@ const createBot = async (req, res) => {
         const exchangeId = exchange.rows.length > 0 ? exchange.rows[0].exchange_id : null;
 
         // 3. Create Bot
-        // Note: Ensure the 'bots' table exists
         const newBot = await pool.query(
             'INSERT INTO bots (user_id, exchange_connection_id, bot_name, quote_currency, bot_type, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
             [req.user.id, exchangeId, bot_name || 'My First Bot', quote_currency, bot_type, 'ready']
@@ -199,11 +174,57 @@ const createBot = async (req, res) => {
     }
 };
 
+// @desc    Get Dashboard Data
+// @route   GET /api/user/dashboard
+// @access  Private
+const getDashboard = async (req, res) => {
+    try {
+        // 1. Fetch User's Real Bots
+        const botsQuery = await pool.query(
+            'SELECT * FROM bots WHERE user_id = $1 ORDER BY created_at DESC',
+            [req.user.id]
+        );
+
+        // 2. DATA FIX: Send Zeros instead of Mock Data
+        // This ensures the frontend shows "$0.00" until the trading engine runs.
+        const dashboardStats = [
+            { 
+                title: "Today's Profit", 
+                value: "$0.00", 
+                percentage: "0.00%", 
+                isPositive: true 
+            },
+            { 
+                title: "30 Days Profit", 
+                value: "$0.00", 
+                percentage: "0.00%", 
+                isPositive: true 
+            },
+            { 
+                title: "Assets Value", 
+                value: "$0.00", 
+                percentage: "0.00%", 
+                isPositive: true 
+            },
+        ];
+
+        res.json({
+            stats: dashboardStats,
+            bots: botsQuery.rows
+        });
+
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+};
+
 module.exports = { 
     getMe, 
     updateProfile, 
     addExchange, 
     createBot, 
     authExchange, 
-    authExchangeCallback 
+    authExchangeCallback,
+    getDashboard
 };
