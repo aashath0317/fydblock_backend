@@ -1,4 +1,4 @@
-// routes/userRoutes.js
+// backend/routes/userRoutes.js
 const router = require('express').Router();
 
 // Import all controllers in one go
@@ -10,9 +10,9 @@ const {
     authExchange, 
     authExchangeCallback,
     getDashboard,
-    getPortfolio 
-    getUserBots
-    getMarketData
+    getPortfolio,   
+    getUserBots, 
+    getMarketData   
 } = require('../controllers/userController');
 
 const { protect } = require('../middleware/authMiddleware');
@@ -34,6 +34,8 @@ router.get('/exchange/auth/:exchange', authExchange);
 router.get('/exchange/callback/:exchange', authExchangeCallback);
 
 router.get('/bots', protect, getUserBots);
+
+// Public Market Data Route
 router.get('/market-data', getMarketData);
 
 module.exports = router;
