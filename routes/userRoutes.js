@@ -1,7 +1,7 @@
 // backend/routes/userRoutes.js
 const router = require('express').Router();
 
-// Import all controllers in one go
+// Import all controllers
 const { 
     getMe, 
     updateProfile, 
@@ -10,32 +10,37 @@ const {
     authExchange, 
     authExchangeCallback,
     getDashboard,
-    getPortfolio,   
-    getUserBots, 
-    getMarketData   
+    getPortfolio,
+    getUserBots,    
+    getMarketData, 
+    getBacktests,   
+    saveBacktest    
 } = require('../controllers/userController');
 
 const { protect } = require('../middleware/authMiddleware');
 
-// User Profile Routes
+// --- User Profile Routes ---
 router.get('/me', protect, getMe);
 router.put('/profile', protect, updateProfile);
 
-// Exchange & Bot Routes
+// --- Exchange & Bot Management ---
 router.post('/exchange', protect, addExchange);
 router.post('/bot', protect, createBot);
+router.get('/bots', protect, getUserBots);
 
-// Dashboard & Portfolio Routes
+// --- Dashboard & Portfolio ---
 router.get('/dashboard', protect, getDashboard);
 router.get('/portfolio', protect, getPortfolio); 
 
-// --- OAUTH ROUTES ---
+// --- Terminal / Live Market Data (Public) ---
+router.get('/market-data', getMarketData);
+
+// --- Backtesting Routes ---
+router.get('/backtests', protect, getBacktests);
+router.post('/backtest/save', protect, saveBacktest);
+
+// --- Exchange OAuth Routes ---
 router.get('/exchange/auth/:exchange', authExchange); 
 router.get('/exchange/callback/:exchange', authExchangeCallback);
-
-router.get('/bots', protect, getUserBots);
-
-// Public Market Data Route
-router.get('/market-data', getMarketData);
 
 module.exports = router;
