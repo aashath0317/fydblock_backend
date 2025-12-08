@@ -65,3 +65,10 @@ CREATE TABLE portfolio_snapshots (
     total_value DECIMAL(18, 2),
     recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE users ADD COLUMN role VARCHAR(20) DEFAULT 'user';
+-- Set your specific user as admin manually
+UPDATE users SET role = 'admin' WHERE email = 'your_email@example.com';
+
+
+
