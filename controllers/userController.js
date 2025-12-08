@@ -46,6 +46,48 @@ const fetchTokenPrices = async (symbols) => {
     }
 };
 
+const getMarketData = async (req, res) => {
+    const { exchange: exchangeId, symbol } = req.query;
+
+    if (!exchangeId || !symbol) {
+        return res.status(400).json({ message: 'Missing exchange or symbol' });
+    }
+
+    try {
+        // 1. Check if exchange exists in CCXT
+        if (!ccxt[exchangeId.toLowerCase()]) {
+            return res.status(400).json({ message: 'Exchange not supported' });
+        }
+
+        // 2. Instantiate Exchange (Public - no keys needed for Order Book)
+        const exchange = new ccxt[exchangeId.toLowerCase()]();
+        
+        // 3. Format Symbol: CCXT expects "BTC/USDT", Frontend sends "BTCUSDT"
+        // Simple logic to insert slash if missing (Assuming USDT pairs for now)
+        let formattedSymbol = symbol;
+        if (!symbol.includes('/')) {
+            // Try to split basic pairs. In production, use a more robust mapper.
+            if (symbol.endsWith('USDT')) formattedSymbol = symbol.replace('USDT', '/USDT');
+            else if (symbol.endsWith('USD')) formattedSymbol = symbol.replace('USD', '/USD');
+            else if (symbol.endsWith('BTC')) formattedSymbol = symbol.replace('BTC', '/BTC');
+        }
+
+        // 4. Fetch Order Book
+        const orderBook = await exchange.fetchOrderBook(formattedSymbol, 10); // Limit to top 10 bids/asks
+
+        res.json({
+            symbol: formattedSymbol,
+            bids: orderBook.bids,
+            asks: orderBook.asks,
+            timestamp: Date.now()
+        });
+
+    } catch (err) {
+        console.error(`Market Data Error (${exchangeId}):`, err.message);
+        res.status(500).json({ message: 'Failed to fetch market data' });
+    }
+};
+
 // --- HELPER: CALCULATE TOTAL VALUE (Used by Cron & API) ---
 const calculateUserTotalValue = async (userId) => {
     // 1. Get User Keys
@@ -475,4 +517,5 @@ module.exports = {
     getPortfolio, 
     calculateUserTotalValue,
     getUserBots 
+    getMarketData
 };
