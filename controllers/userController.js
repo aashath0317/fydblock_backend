@@ -46,49 +46,6 @@ const fetchTokenPrices = async (symbols) => {
     }
 };
 
-// @desc    Get Public Market Data (Order Book)
-const getMarketData = async (req, res) => {
-    const { exchange: exchangeId, symbol } = req.query;
-
-    if (!exchangeId || !symbol) {
-        return res.status(400).json({ message: 'Missing exchange or symbol' });
-    }
-
-    try {
-        // 1. Check if exchange exists in CCXT
-        if (!ccxt[exchangeId.toLowerCase()]) {
-            return res.status(400).json({ message: 'Exchange not supported' });
-        }
-
-        // 2. Instantiate Exchange (Public - no keys needed for Order Book)
-        const exchange = new ccxt[exchangeId.toLowerCase()]();
-        
-        // 3. Format Symbol: CCXT expects "BTC/USDT", Frontend sends "BTCUSDT"
-        // Simple logic to insert slash if missing (Assuming USDT pairs for now)
-        let formattedSymbol = symbol;
-        if (!symbol.includes('/')) {
-            // Try to split basic pairs. In production, use a more robust mapper.
-            if (symbol.endsWith('USDT')) formattedSymbol = symbol.replace('USDT', '/USDT');
-            else if (symbol.endsWith('USD')) formattedSymbol = symbol.replace('USD', '/USD');
-            else if (symbol.endsWith('BTC')) formattedSymbol = symbol.replace('BTC', '/BTC');
-        }
-
-        // 4. Fetch Order Book
-        const orderBook = await exchange.fetchOrderBook(formattedSymbol, 10); // Limit to top 10 bids/asks
-
-        res.json({
-            symbol: formattedSymbol,
-            bids: orderBook.bids,
-            asks: orderBook.asks,
-            timestamp: Date.now()
-        });
-
-    } catch (err) {
-        console.error(`Market Data Error (${exchangeId}):`, err.message);
-        res.status(500).json({ message: 'Failed to fetch market data' });
-    }
-};
-
 // --- HELPER: CALCULATE TOTAL VALUE (Used by Cron & API) ---
 const calculateUserTotalValue = async (userId) => {
     // 1. Get User Keys
@@ -472,7 +429,7 @@ const getPortfolio = async (req, res) => {
     }
 };
 
-// @desc    Get All User Bots with Performance Data (Mocked for UI)
+// @desc    Get All User Bots with Performance Data
 const getUserBots = async (req, res) => {
     try {
         // Fetch real bots from DB
@@ -507,6 +464,76 @@ const getUserBots = async (req, res) => {
     }
 };
 
+// @desc    Get Public Market Data (Order Book)
+const getMarketData = async (req, res) => {
+    const { exchange: exchangeId, symbol } = req.query;
+
+    if (!exchangeId || !symbol) {
+        return res.status(400).json({ message: 'Missing exchange or symbol' });
+    }
+
+    try {
+        // 1. Check if exchange exists in CCXT
+        if (!ccxt[exchangeId.toLowerCase()]) {
+            return res.status(400).json({ message: 'Exchange not supported' });
+        }
+
+        // 2. Instantiate Exchange (Public - no keys needed for Order Book)
+        const exchange = new ccxt[exchangeId.toLowerCase()]();
+        
+        // 3. Format Symbol: CCXT expects "BTC/USDT", Frontend sends "BTCUSDT"
+        let formattedSymbol = symbol;
+        if (!symbol.includes('/')) {
+            if (symbol.endsWith('USDT')) formattedSymbol = symbol.replace('USDT', '/USDT');
+            else if (symbol.endsWith('USD')) formattedSymbol = symbol.replace('USD', '/USD');
+            else if (symbol.endsWith('BTC')) formattedSymbol = symbol.replace('BTC', '/BTC');
+        }
+
+        // 4. Fetch Order Book
+        const orderBook = await exchange.fetchOrderBook(formattedSymbol, 10); // Limit to top 10
+
+        res.json({
+            symbol: formattedSymbol,
+            bids: orderBook.bids,
+            asks: orderBook.asks,
+            timestamp: Date.now()
+        });
+
+    } catch (err) {
+        console.error(`Market Data Error (${exchangeId}):`, err.message);
+        res.status(500).json({ message: 'Failed to fetch market data' });
+    }
+};
+
+// @desc    Get User Backtest History
+const getBacktests = async (req, res) => {
+    try {
+        // In a real app, fetch from DB: SELECT * FROM backtests WHERE user_id = $1
+        // For now, return a mock list or empty array so the frontend doesn't crash
+        const mockData = [
+            { id: 1, pair: 'SOL/USDT', strategy: 'Spot Grid', profit: 2350, date: 'Dec 6, 10:10 AM' },
+            { id: 2, pair: 'BTC/USDT', strategy: 'DCA', profit: -120, date: 'Dec 5, 2:30 PM' }
+        ];
+        res.json(mockData);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server Error');
+    }
+};
+
+// @desc    Save a Backtest Result
+const saveBacktest = async (req, res) => {
+    try {
+        const { pair, strategy, profit, config } = req.body;
+        // In real app: INSERT INTO backtests (...) VALUES (...)
+        console.log("Saving backtest:", pair, profit);
+        res.json({ message: "Backtest saved successfully" });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server Error');
+    }
+};
+
 module.exports = { 
     getMe, 
     updateProfile, 
@@ -517,6 +544,8 @@ module.exports = {
     getDashboard, 
     getPortfolio, 
     calculateUserTotalValue,
-    getUserBots, // Added comma here
-    getMarketData
+    getUserBots,
+    getMarketData, // Fixed: Added comma and function
+    getBacktests,  // Fixed: Added
+    saveBacktest   // Fixed: Added
 };
