@@ -12,6 +12,7 @@ const {
     getDashboard,
     getPortfolio 
     getUserBots
+    getMarketData
 } = require('../controllers/userController');
 
 const { protect } = require('../middleware/authMiddleware');
@@ -33,5 +34,6 @@ router.get('/exchange/auth/:exchange', authExchange);
 router.get('/exchange/callback/:exchange', authExchangeCallback);
 
 router.get('/bots', protect, getUserBots);
+router.get('/market-data', getMarketData);
 
 module.exports = router;
