@@ -46,6 +46,7 @@ const fetchTokenPrices = async (symbols) => {
     }
 };
 
+// @desc    Get Public Market Data (Order Book)
 const getMarketData = async (req, res) => {
     const { exchange: exchangeId, symbol } = req.query;
 
@@ -516,6 +517,6 @@ module.exports = {
     getDashboard, 
     getPortfolio, 
     calculateUserTotalValue,
-    getUserBots 
+    getUserBots, // Added comma here
     getMarketData
 };
