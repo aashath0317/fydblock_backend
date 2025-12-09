@@ -260,7 +260,8 @@ const authExchangeCallback = async (req, res) => {
     }
 };
 
-// @desc    Create Bot & Subscription (UPDATED for Admin Dashboard)
+// @desc    Create Bot & Subscription
+// ✅ UPDATED: To accept description, config, icon, and status from dashboard
 const createBot = async (req, res) => {
     const { bot_name, quote_currency, bot_type, plan, billing_cycle, description, config, icon, status } = req.body;
 
@@ -278,6 +279,7 @@ const createBot = async (req, res) => {
             'SELECT exchange_id FROM user_exchanges WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
             [req.user.id]
         );
+        
         const exchangeId = exchange.rows.length > 0 ? exchange.rows[0].exchange_id : null;
 
         // 3. Create Bot with Extended Fields
