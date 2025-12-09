@@ -98,7 +98,7 @@ const calculateUserTotalValue = async (userId) => {
         const prices = await fetchTokenPrices(symbols);
         let totalValue = 0;
 
-        // Re-declare map here for local usage (or move it to global scope)
+        // Re-declare map here for local usage
         const symbolMap = { 
             'BTC': 'bitcoin', 'ETH': 'ethereum', 'USDT': 'tether', 'SOL': 'solana', 
             'BNB': 'binancecoin', 'XRP': 'ripple', 'ADA': 'cardano', 'DOGE': 'dogecoin',
@@ -115,7 +115,6 @@ const calculateUserTotalValue = async (userId) => {
         return totalValue;
 
     } catch (err) {
-        // IMPROVED ERROR HANDLING
         if (err instanceof ccxt.AuthenticationError) {
             console.error(`Calc Error User ${userId}: Invalid API Keys`);
         } else if (err instanceof ccxt.NetworkError) {
@@ -178,7 +177,6 @@ const addExchange = async (req, res) => {
     const { exchange_name, api_key, api_secret, passphrase } = req.body;
 
     try {
-        // Validate keys before saving (Optional but recommended)
         const exchangeId = exchange_name.toLowerCase();
         if (ccxt[exchangeId]) {
             const exchange = new ccxt[exchangeId]({
@@ -186,8 +184,7 @@ const addExchange = async (req, res) => {
                 secret: api_secret,
                 password: passphrase
             });
-            // Try a lightweight public call or balance check to verify
-            // await exchange.fetchBalance(); 
+            // Optional: await exchange.fetchBalance(); 
         }
 
         const encryptedKey = encrypt(api_key);
@@ -202,7 +199,6 @@ const addExchange = async (req, res) => {
         res.json(newExchange.rows[0]);
     } catch (err) {
         console.error(err.message);
-        // Handle specific CCXT errors during connection test here if you implemented the check above
         res.status(500).send('Server Error');
     }
 };
@@ -264,13 +260,12 @@ const authExchangeCallback = async (req, res) => {
     }
 };
 
-// @desc    Create Bot & Subscription
-// ✅ UPDATED: To accept description, config, icon, and status from dashboard
+// @desc    Create Bot & Subscription (UPDATED for Admin Dashboard)
 const createBot = async (req, res) => {
     const { bot_name, quote_currency, bot_type, plan, billing_cycle, description, config, icon, status } = req.body;
 
     try {
-        // 1. Create Subscription (Only if plan is provided - for client users)
+        // 1. Create Subscription (Only if plan is provided)
         if (plan) {
             await pool.query(
                 'INSERT INTO subscriptions (user_id, plan_type, billing_cycle) VALUES ($1, $2, $3)',
@@ -283,7 +278,6 @@ const createBot = async (req, res) => {
             'SELECT exchange_id FROM user_exchanges WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
             [req.user.id]
         );
-        
         const exchangeId = exchange.rows.length > 0 ? exchange.rows[0].exchange_id : null;
 
         // 3. Create Bot with Extended Fields
@@ -312,6 +306,27 @@ const createBot = async (req, res) => {
     }
 };
 
+// @desc    Delete a Bot
+const deleteBot = async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        const result = await pool.query(
+            'DELETE FROM bots WHERE bot_id = $1 AND user_id = $2 RETURNING *',
+            [id, req.user.id]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ message: 'Bot not found or unauthorized' });
+        }
+
+        res.json({ message: 'Bot removed' });
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+};
+
 // @desc    Get Dashboard Data
 const getDashboard = async (req, res) => {
     try {
@@ -320,7 +335,6 @@ const getDashboard = async (req, res) => {
             [req.user.id]
         );
 
-        // In a real app, you would calculate these from live trading data or DB history
         const dashboardStats = [
             { title: "Today's Profit", value: "$0.00", percentage: "0.00%", isPositive: true },
             { title: "30 Days Profit", value: "$0.00", percentage: "0.00%", isPositive: true },
@@ -353,7 +367,6 @@ const getPortfolio = async (req, res) => {
         
         let balances = {};
         
-        // --- IMPROVED ERROR HANDLING FOR PORTFOLIO ---
         try {
             const trading = await exchange.fetchBalance();
             if (trading.total) Object.entries(trading.total).forEach(([s, a]) => { if (a > 0) balances[s] = a; });
@@ -371,7 +384,6 @@ const getPortfolio = async (req, res) => {
             } else if (e instanceof ccxt.RateLimitExceeded) {
                  return res.status(429).json({ message: 'Rate limit exceeded. Please try again later.' });
             }
-            // For other exchange errors, return a generic 500 but log the specific error
             return res.status(500).json({ message: 'Error fetching portfolio data from exchange.' });
         }
 
@@ -381,7 +393,6 @@ const getPortfolio = async (req, res) => {
         let totalValue = 0;
         let previousTotalValue = 0;
         
-        // Full Symbol Map for Portfolio
         const symbolMap = { 
             'BTC': 'bitcoin', 'ETH': 'ethereum', 'USDT': 'tether', 'SOL': 'solana', 
             'BNB': 'binancecoin', 'XRP': 'ripple', 'ADA': 'cardano', 'DOGE': 'dogecoin',
@@ -417,7 +428,6 @@ const getPortfolio = async (req, res) => {
 
         const changePercent = previousTotalValue > 0 ? ((totalValue - previousTotalValue) / previousTotalValue) * 100 : 0;
 
-        // 2. FETCH HISTORY FROM DATABASE (The 24h Chart)
         const historyQuery = await pool.query(
             `SELECT total_value FROM portfolio_snapshots 
              WHERE user_id = $1 AND recorded_at >= NOW() - INTERVAL '24 HOURS' 
@@ -427,11 +437,9 @@ const getPortfolio = async (req, res) => {
 
         let history = historyQuery.rows.map(r => parseFloat(r.total_value));
 
-        // If no history exists yet (new user), use current value as a starting point
         if (history.length === 0) {
             history = [totalValue]; 
         } else {
-            // Append current real-time value to the end of the chart for the "live" feel
             history.push(totalValue);
         }
 
@@ -439,7 +447,7 @@ const getPortfolio = async (req, res) => {
             totalValue,
             changePercent,
             assets: enrichedAssets,
-            history: history // Chart data
+            history: history 
         });
 
     } catch (err) {
@@ -451,20 +459,15 @@ const getPortfolio = async (req, res) => {
 // @desc    Get All User Bots with Performance Data
 const getUserBots = async (req, res) => {
     try {
-        // Fetch real bots from DB
         const botsQuery = await pool.query(
             'SELECT * FROM bots WHERE user_id = $1 AND status != \'archived\' ORDER BY created_at DESC',
             [req.user.id]
         );
 
-        // Enhance with mock performance data (since we don't have a live trading engine yet)
         const enrichedBots = botsQuery.rows.map(bot => {
-            // Generate random profit/loss for demo visualization
             const isPositive = Math.random() > 0.3;
             const totalProfit = (Math.random() * 5000).toFixed(2);
             const invested = (Math.random() * 5000 + 1000).toFixed(2);
-
-            // Mock chart data (array of numbers)
             const chartData = Array.from({ length: 10 }, () => Math.floor(Math.random() * 100));
 
             return {
@@ -492,15 +495,12 @@ const getMarketData = async (req, res) => {
     }
 
     try {
-        // 1. Check if exchange exists in CCXT
         if (!ccxt[exchangeId.toLowerCase()]) {
             return res.status(400).json({ message: 'Exchange not supported' });
         }
 
-        // 2. Instantiate Exchange (Public - no keys needed for Order Book)
         const exchange = new ccxt[exchangeId.toLowerCase()]();
         
-        // 3. Format Symbol: CCXT expects "BTC/USDT", Frontend sends "BTCUSDT"
         let formattedSymbol = symbol;
         if (!symbol.includes('/')) {
             if (symbol.endsWith('USDT')) formattedSymbol = symbol.replace('USDT', '/USDT');
@@ -508,8 +508,7 @@ const getMarketData = async (req, res) => {
             else if (symbol.endsWith('BTC')) formattedSymbol = symbol.replace('BTC', '/BTC');
         }
 
-        // 4. Fetch Order Book
-        const orderBook = await exchange.fetchOrderBook(formattedSymbol, 10); // Limit to top 10
+        const orderBook = await exchange.fetchOrderBook(formattedSymbol, 10); 
 
         res.json({
             symbol: formattedSymbol,
@@ -527,8 +526,6 @@ const getMarketData = async (req, res) => {
 // @desc    Get User Backtest History
 const getBacktests = async (req, res) => {
     try {
-        // In a real app, fetch from DB: SELECT * FROM backtests WHERE user_id = $1
-        // For now, return a mock list or empty array so the frontend doesn't crash
         const mockData = [
             { id: 1, pair: 'SOL/USDT', strategy: 'Spot Grid', profit: 2350, date: 'Dec 6, 10:10 AM' },
             { id: 2, pair: 'BTC/USDT', strategy: 'DCA', profit: -120, date: 'Dec 5, 2:30 PM' }
@@ -544,7 +541,6 @@ const getBacktests = async (req, res) => {
 const saveBacktest = async (req, res) => {
     try {
         const { pair, strategy, profit, config } = req.body;
-        // In real app: INSERT INTO backtests (...) VALUES (...)
         console.log("Saving backtest:", pair, profit);
         res.json({ message: "Backtest saved successfully" });
     } catch (err) {
@@ -558,6 +554,7 @@ module.exports = {
     updateProfile, 
     addExchange, 
     createBot, 
+    deleteBot, // ✅ Added export for deleteBot
     authExchange, 
     authExchangeCallback, 
     getDashboard, 
