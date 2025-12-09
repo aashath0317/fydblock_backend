@@ -42,5 +42,6 @@ router.post('/backtest/save', protect, saveBacktest);
 // --- Exchange OAuth Routes ---
 router.get('/exchange/auth/:exchange', authExchange); 
 router.get('/exchange/callback/:exchange', authExchangeCallback);
+router.delete('/bot/:id', protect, deleteBot);
 
 module.exports = router;
