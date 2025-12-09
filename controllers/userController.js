@@ -363,6 +363,26 @@ const deleteBot = async (req, res) => {
     }
 };
 
+// @desc    Get Available System Bots (Templates created by Admin)
+// ✅ NEW FUNCTION: Fetches bots created by admin users
+const getAvailableBots = async (req, res) => {
+    try {
+        // Fetch active bots created by users with the 'admin' role
+        const query = `
+            SELECT b.* FROM bots b
+            JOIN users u ON b.user_id = u.id
+            WHERE u.role = 'admin' AND b.status = 'active'
+            ORDER BY b.created_at DESC
+        `;
+        
+        const result = await pool.query(query);
+        res.json(result.rows);
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+};
+
 // @desc    Get Dashboard Data
 const getDashboard = async (req, res) => {
     try {
@@ -590,8 +610,9 @@ module.exports = {
     updateProfile, 
     addExchange, 
     createBot,
-    updateBot, // ✅ Added export for updateBot
-    deleteBot, // ✅ Added export for deleteBot
+    updateBot, 
+    deleteBot,
+    getAvailableBots, // ✅ Added export for getAvailableBots
     authExchange, 
     authExchangeCallback, 
     getDashboard, 
