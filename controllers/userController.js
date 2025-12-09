@@ -265,15 +265,20 @@ const authExchangeCallback = async (req, res) => {
 };
 
 // @desc    Create Bot & Subscription
+// ✅ UPDATED: To accept description, config, icon, and status from dashboard
 const createBot = async (req, res) => {
-    const { bot_name, quote_currency, bot_type, plan, billing_cycle } = req.body;
+    const { bot_name, quote_currency, bot_type, plan, billing_cycle, description, config, icon, status } = req.body;
 
     try {
-        await pool.query(
-            'INSERT INTO subscriptions (user_id, plan_type, billing_cycle) VALUES ($1, $2, $3) RETURNING subscription_id',
-            [req.user.id, plan, billing_cycle]
-        );
+        // 1. Create Subscription (Only if plan is provided - for client users)
+        if (plan) {
+            await pool.query(
+                'INSERT INTO subscriptions (user_id, plan_type, billing_cycle) VALUES ($1, $2, $3)',
+                [req.user.id, plan, billing_cycle]
+            );
+        }
 
+        // 2. Get Exchange Connection
         const exchange = await pool.query(
             'SELECT exchange_id FROM user_exchanges WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
             [req.user.id]
@@ -281,9 +286,23 @@ const createBot = async (req, res) => {
         
         const exchangeId = exchange.rows.length > 0 ? exchange.rows[0].exchange_id : null;
 
+        // 3. Create Bot with Extended Fields
         const newBot = await pool.query(
-            'INSERT INTO bots (user_id, exchange_connection_id, bot_name, quote_currency, bot_type, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
-            [req.user.id, exchangeId, bot_name || 'My First Bot', quote_currency, bot_type, 'ready']
+            `INSERT INTO bots 
+            (user_id, exchange_connection_id, bot_name, quote_currency, bot_type, status, description, config, icon_url) 
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) 
+            RETURNING *`,
+            [
+                req.user.id, 
+                exchangeId, 
+                bot_name || 'My New Bot', 
+                quote_currency || 'USDT', 
+                bot_type, 
+                status || 'ready', 
+                description,
+                config, // Saves the parameter JSON
+                icon
+            ]
         );
 
         res.json(newBot.rows[0]);
@@ -453,7 +472,7 @@ const getUserBots = async (req, res) => {
                 total_profit: isPositive ? totalProfit : -totalProfit,
                 invested_capital: invested,
                 chart_data: chartData,
-                is_running: bot.status === 'running' || bot.status === 'ready'
+                is_running: bot.status === 'running' || bot.status === 'active'
             };
         });
 
@@ -545,7 +564,7 @@ module.exports = {
     getPortfolio, 
     calculateUserTotalValue,
     getUserBots,
-    getMarketData, // Fixed: Added comma and function
-    getBacktests,  // Fixed: Added
-    saveBacktest   // Fixed: Added
+    getMarketData, 
+    getBacktests,  
+    saveBacktest   
 };
