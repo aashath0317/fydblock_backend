@@ -1,8 +1,60 @@
 const pool = require('../db');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+
 const { OAuth2Client } = require('google-auth-library');
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+// Helper to generate random code
+const generateReferralCode = () => {
+    return crypto.randomBytes(4).toString('hex'); // Generates 8-char string
+};
+
+// 1. REGISTER USER
+const register = async (req, res) => {
+    // Expect 'ref' in body if the user signed up via a referral link
+    const { email, password, full_name, country, phone, ref_code } = req.body;
+
+    try {
+        const userCheck = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+        if (userCheck.rows.length > 0) {
+            return res.status(400).json({ message: 'User already exists' });
+        }
+
+        // Handle Referral Logic
+        let referrerId = null;
+        if (ref_code) {
+            const referrer = await pool.query('SELECT id FROM users WHERE referral_code = $1', [ref_code]);
+            if (referrer.rows.length > 0) {
+                referrerId = referrer.rows[0].id;
+            }
+        }
+
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+        const newReferralCode = generateReferralCode(); // Generate code for THIS user
+
+        // Insert with new fields
+        const newUser = await pool.query(
+            `INSERT INTO users 
+            (email, password, full_name, country, phone_number, referral_code, referred_by) 
+            VALUES ($1, $2, $3, $4, $5, $6, $7) 
+            RETURNING id, email, full_name, referral_code`,
+            [email, hashedPassword, full_name, country, phone, newReferralCode, referrerId]
+        );
+
+        const token = jwt.sign({ id: newUser.rows[0].id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+
+        res.json({ token, user: newUser.rows[0] });
+
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+};
+
+
 
 // 1. REGISTER USER
 const register = async (req, res) => {
@@ -113,3 +165,4 @@ const googleAuth = async (req, res) => {
 };
 
 module.exports = { register, login, googleAuth };
+
