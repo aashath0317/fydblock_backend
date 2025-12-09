@@ -7,7 +7,8 @@ const {
     updateProfile, 
     addExchange, 
     createBot, 
-    deleteBot, // ✅ Added this import
+    updateBot,
+    deleteBot, 
     authExchange, 
     authExchangeCallback,
     getDashboard,
@@ -28,7 +29,8 @@ router.put('/profile', protect, updateProfile);
 router.post('/exchange', protect, addExchange);
 router.post('/bot', protect, createBot);
 router.get('/bots', protect, getUserBots);
-router.delete('/bot/:id', protect, deleteBot); // ✅ Added DELETE route
+router.put('/bot/:id', protect, updateBot); // ✅ Added PUT route for editing
+router.delete('/bot/:id', protect, deleteBot); 
 
 // --- Dashboard & Portfolio ---
 router.get('/dashboard', protect, getDashboard);
