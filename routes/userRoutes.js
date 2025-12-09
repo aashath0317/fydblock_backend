@@ -7,6 +7,7 @@ const {
     updateProfile, 
     addExchange, 
     createBot, 
+    deleteBot, 
     authExchange, 
     authExchangeCallback,
     getDashboard,
@@ -27,6 +28,7 @@ router.put('/profile', protect, updateProfile);
 router.post('/exchange', protect, addExchange);
 router.post('/bot', protect, createBot);
 router.get('/bots', protect, getUserBots);
+router.delete('/bot/:id', protect, deleteBot);
 
 // --- Dashboard & Portfolio ---
 router.get('/dashboard', protect, getDashboard);
@@ -42,6 +44,5 @@ router.post('/backtest/save', protect, saveBacktest);
 // --- Exchange OAuth Routes ---
 router.get('/exchange/auth/:exchange', authExchange); 
 router.get('/exchange/callback/:exchange', authExchangeCallback);
-router.delete('/bot/:id', protect, deleteBot);
 
 module.exports = router;
