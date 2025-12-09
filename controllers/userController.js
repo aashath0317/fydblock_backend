@@ -308,6 +308,40 @@ const createBot = async (req, res) => {
     }
 };
 
+// @desc    Update an existing Bot
+// ✅ NEW FUNCTION ADDED FOR EDITING
+const updateBot = async (req, res) => {
+    const { id } = req.params;
+    const { bot_name, bot_type, status, description, config } = req.body;
+
+    try {
+        const updatedBot = await pool.query(
+            `UPDATE bots 
+             SET bot_name = $1, bot_type = $2, status = $3, description = $4, config = $5
+             WHERE bot_id = $6 AND user_id = $7
+             RETURNING *`,
+            [
+                bot_name, 
+                bot_type, 
+                status, 
+                description, 
+                config, // JSON string
+                id, 
+                req.user.id
+            ]
+        );
+
+        if (updatedBot.rows.length === 0) {
+            return res.status(404).json({ message: 'Bot not found or unauthorized' });
+        }
+
+        res.json(updatedBot.rows[0]);
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+};
+
 // @desc    Delete a Bot
 const deleteBot = async (req, res) => {
     try {
@@ -555,7 +589,8 @@ module.exports = {
     getMe, 
     updateProfile, 
     addExchange, 
-    createBot, 
+    createBot,
+    updateBot, // ✅ Added export for updateBot
     deleteBot, // ✅ Added export for deleteBot
     authExchange, 
     authExchangeCallback, 
