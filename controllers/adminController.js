@@ -4,16 +4,15 @@ const pool = require('../db');
 // @desc Get Admin Overview Stats
 const getOverview = async (req, res) => {
     try {
-        // Real counts
         const userCount = await pool.query('SELECT COUNT(*) FROM users');
         const botCount = await pool.query('SELECT COUNT(*) FROM bots');
         
-        // Mock data for UI visualization matching the image
+        // Mock stats for the chart (since we don't have an activity_logs table yet)
         const stats = {
             totalUsers: parseInt(userCount.rows[0].count),
-            revenue: 12500500, // Matching image
+            revenue: 12500500, 
             activeSessions: 1250,
-            systemActivity: [ // Mock data for line chart
+            systemActivity: [ 
                 { time: '10am', login: 40, api: 24 },
                 { time: '11am', login: 30, api: 18 },
                 { time: '12pm', login: 45, api: 35 },
@@ -23,9 +22,7 @@ const getOverview = async (req, res) => {
             ],
             recentLogs: [
                 { id: 1, time: '10:00:32 AM', action: 'Complete user action', user: '$132', status: 'Success' },
-                { id: 2, time: '10:00:32 AM', action: 'Remote API Calls', user: '$132', status: 'Failed' },
-                { id: 3, time: '10:00:32 AM', action: 'Complete user action', user: '$132', status: 'Success' },
-                { id: 4, time: '10:00:32 AM', action: 'Remote API Calls', user: '$132', status: 'Success' },
+                { id: 2, time: '10:00:32 AM', action: 'Remote API Calls', user: '$132', status: 'Failed' }
             ]
         };
         res.json(stats);
@@ -41,20 +38,26 @@ const getUsers = async (req, res) => {
         const users = await pool.query('SELECT id, full_name, email, role, created_at FROM users ORDER BY created_at DESC LIMIT 20');
         res.json(users.rows);
     } catch (err) {
+        console.error(err);
         res.status(500).send('Server Error');
     }
 };
 
-// @desc Get Admin Bots (The 4 Bots)
+// @desc Get Admin Bots (Real DB Data)
 const getAdminBots = async (req, res) => {
-    // Hardcoded to match your requirement of "now we have 4 bots"
-    const bots = [
-        { id: 1, name: 'Alpha Bot', status: 'Active', performance: '+31.29%', profit: '31.29 Jwrs', uptime: '1 ms', type: 'DCA' },
-        { id: 2, name: 'Beta Trader', status: 'Paused', performance: 'Frausing', profit: '13.36 Jwrs', uptime: '0 ms', type: 'Grid' },
-        { id: 3, name: 'Gamma Scout', status: 'Active', performance: '0%', profit: '12.22 Jwrs', uptime: '0 ms', type: 'Futures' },
-        { id: 4, name: 'Delta Exec', status: 'Active', performance: 'Paused', profit: '13.02 Jwrs', uptime: '0 ms', type: 'Arbitrage' }
-    ];
-    res.json(bots);
+    try {
+        // ✅ CHANGED: Now fetching from DB instead of returning fake array
+        // We fetch bots belonging to the logged-in admin
+        const bots = await pool.query(
+            'SELECT * FROM bots WHERE user_id = $1 ORDER BY created_at DESC', 
+            [req.user.id]
+        );
+        
+        res.json(bots.rows);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Server Error');
+    }
 };
 
 module.exports = { getOverview, getUsers, getAdminBots };
