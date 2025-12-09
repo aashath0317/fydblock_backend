@@ -261,7 +261,7 @@ const authExchangeCallback = async (req, res) => {
 };
 
 // @desc    Create Bot & Subscription
-// ✅ UPDATED: To accept description, config, icon, and status from dashboard
+// ✅ UPDATED: To accept description, config, icon, and status from dashboard/admin
 const createBot = async (req, res) => {
     const { bot_name, quote_currency, bot_type, plan, billing_cycle, description, config, icon, status } = req.body;
 
@@ -282,7 +282,7 @@ const createBot = async (req, res) => {
         
         const exchangeId = exchange.rows.length > 0 ? exchange.rows[0].exchange_id : null;
 
-        // 3. Create Bot with Extended Fields
+        // 3. Create Bot with Extended Fields (Including Icon)
         const newBot = await pool.query(
             `INSERT INTO bots 
             (user_id, exchange_connection_id, bot_name, quote_currency, bot_type, status, description, config, icon_url) 
@@ -297,7 +297,7 @@ const createBot = async (req, res) => {
                 status || 'ready', 
                 description,
                 config, // Saves the parameter JSON
-                icon
+                icon    // Saves the Base64 image string
             ]
         );
 
@@ -309,16 +309,16 @@ const createBot = async (req, res) => {
 };
 
 // @desc    Update an existing Bot
-// ✅ NEW FUNCTION ADDED FOR EDITING
 const updateBot = async (req, res) => {
     const { id } = req.params;
-    const { bot_name, bot_type, status, description, config } = req.body;
+    const { bot_name, bot_type, status, description, config, icon } = req.body;
 
     try {
+        // ✅ Updates bot details including the icon (Base64)
         const updatedBot = await pool.query(
             `UPDATE bots 
-             SET bot_name = $1, bot_type = $2, status = $3, description = $4, config = $5
-             WHERE bot_id = $6 AND user_id = $7
+             SET bot_name = $1, bot_type = $2, status = $3, description = $4, config = $5, icon_url = $6
+             WHERE bot_id = $7 AND user_id = $8
              RETURNING *`,
             [
                 bot_name, 
@@ -326,6 +326,7 @@ const updateBot = async (req, res) => {
                 status, 
                 description, 
                 config, // JSON string
+                icon,   // Base64 string
                 id, 
                 req.user.id
             ]
@@ -364,7 +365,6 @@ const deleteBot = async (req, res) => {
 };
 
 // @desc    Get Available System Bots (Templates created by Admin)
-// ✅ NEW FUNCTION: Fetches bots created by admin users
 const getAvailableBots = async (req, res) => {
     try {
         // Fetch active bots created by users with the 'admin' role
@@ -612,7 +612,7 @@ module.exports = {
     createBot,
     updateBot, 
     deleteBot,
-    getAvailableBots, // ✅ Added export for getAvailableBots
+    getAvailableBots, // Export new function
     authExchange, 
     authExchangeCallback, 
     getDashboard, 
