@@ -6,99 +6,8 @@ const ccxt = require('ccxt');
 const { encrypt, decrypt } = require('../utils/encryption');
 
 // --- GLOBAL VARIABLES ---
-let priceCache = { data: {}, lastFetch: 0 };
 const TRADING_ENGINE_URL = process.env.TRADING_ENGINE_URL || 'http://localhost:8000';
 const BOT_SECRET = process.env.BOT_SECRET || 'my_super_secure_bot_secret_123';
-
-// ============================================================
-// HELPER FUNCTIONS
-// ============================================================
-
-// 1. Fetch Crypto Prices (Cached from CoinGecko)
-const fetchTokenPrices = async (symbols) => {
-    if (symbols.length === 0) return {};
-    
-    const CACHE_DURATION = 60 * 1000; // 1 minute cache
-    const now = Date.now();
-
-    if (now - priceCache.lastFetch < CACHE_DURATION && Object.keys(priceCache.data).length > 0) {
-        return priceCache.data;
-    }
-
-    // Map common symbols to CoinGecko IDs
-    const symbolMap = {
-        'BTC': 'bitcoin', 'ETH': 'ethereum', 'USDT': 'tether', 'SOL': 'solana',
-        'BNB': 'binancecoin', 'XRP': 'ripple', 'ADA': 'cardano', 'DOGE': 'dogecoin',
-        'USDC': 'usd-coin', 'DOT': 'polkadot', 'MATIC': 'matic-network', 'LTC': 'litecoin',
-        'AVAX': 'avalanche-2', 'TRX': 'tron', 'SHIB': 'shiba-inu', 'LINK': 'chainlink'
-    };
-
-    const assetIds = symbols.map(s => symbolMap[s.toUpperCase()] || s.toLowerCase()).join(',');
-
-    try {
-        const url = `https://api.coingecko.com/api/v3/simple/price?ids=${assetIds}&vs_currencies=usd&include_24hr_change=true`;
-        const res = await axios.get(url);
-        
-        priceCache.data = res.data;
-        priceCache.lastFetch = now;
-        return res.data;
-    } catch (err) {
-        console.error("CoinGecko Error:", err.message);
-        return priceCache.data || {};
-    }
-};
-
-// 2. Calculate Total User Portfolio Value (Internal Helper)
-const calculateUserTotalValue = async (userId) => {
-    const keysQuery = await pool.query(
-        'SELECT * FROM user_exchanges WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
-        [userId]
-    );
-    if (keysQuery.rows.length === 0) return 0;
-
-    const exchangeData = keysQuery.rows[0];
-    const exchangeId = exchangeData.exchange_name.toLowerCase();
-    const apiKey = decrypt(exchangeData.api_key);
-    const apiSecret = decrypt(exchangeData.api_secret);
-    const password = exchangeData.passphrase ? decrypt(exchangeData.passphrase) : undefined;
-
-    if (!ccxt[exchangeId]) return 0;
-
-    const exchange = new ccxt[exchangeId]({
-        apiKey, secret: apiSecret, password, enableRateLimit: true,
-    });
-
-    try {
-        const tradingBalance = await exchange.fetchBalance();
-        let balances = {};
-        
-        if (tradingBalance.total) {
-            for (const [symbol, amount] of Object.entries(tradingBalance.total)) {
-                if (amount > 0) balances[symbol] = amount;
-            }
-        }
-
-        const assetsList = Object.entries(balances).map(([symbol, balance]) => ({ symbol, balance }));
-        if (assetsList.length === 0) return 0;
-
-        const symbols = assetsList.map(a => a.symbol);
-        const prices = await fetchTokenPrices(symbols);
-        let totalValue = 0;
-
-        assetsList.forEach(asset => {
-            const coinId = asset.symbol.toLowerCase(); // simplified lookup
-            // Note: In production, reuse the symbolMap logic from fetchTokenPrices
-            const priceData = prices[coinId] || { usd: 0 }; 
-            totalValue += asset.balance * priceData.usd;
-        });
-
-        return totalValue;
-
-    } catch (err) {
-        console.error(`Calc Error User ${userId}:`, err.message);
-        return 0;
-    }
-};
 
 // ============================================================
 // CONTROLLERS
@@ -117,7 +26,6 @@ const getMe = async (req, res) => {
         }
 
         const user = userQuery.rows[0];
-        // Filter out SKIPPED bots
         const botQuery = await pool.query("SELECT * FROM bots WHERE user_id = $1 AND bot_type != 'SKIPPED'", [req.user.id]);
         const exchangeQuery = await pool.query('SELECT 1 FROM user_exchanges WHERE user_id = $1 LIMIT 1', [req.user.id]);
 
@@ -157,7 +65,6 @@ const addExchange = async (req, res) => {
         const exchangeId = exchange_name.toLowerCase();
         if (ccxt[exchangeId]) {
             const exchange = new ccxt[exchangeId]({ apiKey: api_key, secret: api_secret, password: passphrase });
-            // await exchange.fetchBalance(); // Optional check
         }
 
         const encryptedKey = encrypt(api_key);
@@ -176,7 +83,6 @@ const addExchange = async (req, res) => {
     }
 };
 
-// @desc    Auth Exchange Placeholder
 const authExchange = (req, res) => { res.status(501).json({ message: "OAuth not implemented" }); };
 const authExchangeCallback = async (req, res) => { res.redirect(`${process.env.FRONTEND_URL}/dashboard`); };
 
@@ -198,7 +104,6 @@ const createBot = async (req, res) => {
         );
         const exchangeId = exchange.rows.length > 0 ? exchange.rows[0].exchange_id : null;
 
-        // Config is passed as JSON object or string
         const configStr = typeof config === 'object' ? JSON.stringify(config) : config;
 
         const newBot = await pool.query(
@@ -250,11 +155,9 @@ const updateBot = async (req, res) => {
 const deleteBot = async (req, res) => {
     try {
         const { id } = req.params;
-        
-        // Try stopping engine task first
         try {
             await axios.post(`${TRADING_ENGINE_URL}/stop/${id}`);
-        } catch (e) { /* Ignore if bot wasn't running */ }
+        } catch (e) { /* Ignore */ }
 
         const result = await pool.query(
             'DELETE FROM bots WHERE bot_id = $1 AND user_id = $2 RETURNING *',
@@ -280,6 +183,7 @@ const getDashboard = async (req, res) => {
             [req.user.id]
         );
 
+        // Simple placeholder stats
         const dashboardStats = [
             { title: "Today's Profit", value: "$0.00", percentage: "0.00%", isPositive: true },
             { title: "30 Days Profit", value: "$0.00", percentage: "0.00%", isPositive: true },
@@ -301,7 +205,6 @@ const getUserBots = async (req, res) => {
             [req.user.id]
         );
 
-        // Mock performance data for UI
         const enrichedBots = botsQuery.rows.map(bot => ({
             ...bot,
             total_profit: (Math.random() * 100).toFixed(2),
@@ -316,7 +219,7 @@ const getUserBots = async (req, res) => {
     }
 };
 
-// @desc    Get System/Admin Bots (Templates)
+// @desc    Get System Bots
 const getAvailableBots = async (req, res) => {
     try {
         const query = `
@@ -333,13 +236,13 @@ const getAvailableBots = async (req, res) => {
     }
 };
 
-// @desc    Get Real-Time Portfolio (Robust Version)
+// @desc    Get Real-Time Portfolio (FIXED PRICE FETCHING)
 const getPortfolio = async (req, res) => {
     try {
+        // 1. Get Keys
         const keysQuery = await pool.query('SELECT * FROM user_exchanges WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1', [req.user.id]);
         
         if (keysQuery.rows.length === 0) {
-            console.log(`User ${req.user.id} has no keys.`);
             return res.json({ totalValue: 0, changePercent: 0, assets: [], history: [] });
         }
 
@@ -352,46 +255,76 @@ const getPortfolio = async (req, res) => {
             apiSecret = decrypt(exchangeData.api_secret);
             password = exchangeData.passphrase ? decrypt(exchangeData.passphrase) : undefined;
         } catch (e) {
-            console.error("Decryption failed for user", req.user.id);
+            console.error("Decryption failed:", e);
             return res.status(500).json({ message: "Key Error" });
         }
 
         if (!ccxt[exchangeId]) return res.status(400).json({ message: 'Exchange not supported' });
 
         const exchange = new ccxt[exchangeId]({ apiKey, secret: apiSecret, password, enableRateLimit: true });
-        let balances = {};
         
+        // 2. Fetch Balance
+        let balances = {};
         try {
-            console.log(`Fetching balance for user ${req.user.id}...`);
             const trading = await exchange.fetchBalance();
             if (trading.total) {
-                Object.entries(trading.total).forEach(([s, a]) => { if (a > 0) balances[s] = a; });
+                Object.entries(trading.total).forEach(([s, a]) => { 
+                    if (a > 0) balances[s] = a; 
+                });
             }
         } catch (e) {
-            console.error("CCXT Fetch Error:", e.message);
+            console.error("CCXT Balance Error:", e.message);
             return res.json({ totalValue: 0, changePercent: 0, assets: [], history: [] });
         }
 
         const assetsList = Object.entries(balances).map(([s, b]) => ({ symbol: s, balance: b }));
         if (assetsList.length === 0) return res.json({ totalValue: 0, changePercent: 0, assets: [], history: [] });
 
-        const prices = await fetchTokenPrices(assetsList.map(a => a.symbol));
+        // 3. ✅ FETCH PRICES FROM EXCHANGE (Not CoinGecko)
+        // We create symbols like 'BTC/USDT', 'ETH/USDT' to get prices
+        let tickers = {};
+        try {
+            const symbolsToFetch = assetsList
+                .filter(a => a.symbol !== 'USDT' && a.symbol !== 'USDC') // Don't fetch price for stablecoins yet
+                .map(a => `${a.symbol}/USDT`);
+            
+            if (symbolsToFetch.length > 0) {
+                tickers = await exchange.fetchTickers(symbolsToFetch);
+            }
+        } catch (e) {
+            console.error("CCXT Ticker Error:", e.message);
+            // Continue anyway, maybe we have stablecoins
+        }
 
         let totalValue = 0;
+        
         const enrichedAssets = assetsList.map(asset => {
-            const priceKey = Object.keys(prices).find(k => k.toUpperCase() === asset.symbol.toUpperCase()) || asset.symbol.toLowerCase();
-            const price = prices[priceKey]?.usd || 0;
+            let price = 0;
+
+            // Stablecoin logic
+            if (['USDT', 'USDC', 'DAI', 'BUSD'].includes(asset.symbol.toUpperCase())) {
+                price = 1.0;
+            } else {
+                // Try to find price in tickers
+                const pair = `${asset.symbol}/USDT`;
+                if (tickers[pair]) {
+                    price = tickers[pair].last;
+                }
+            }
+            
             const val = asset.balance * price;
             totalValue += val;
             
             return {
-                symbol: asset.symbol.toUpperCase(), // Normalize for local icon matching
+                symbol: asset.symbol.toUpperCase(), 
                 balance: asset.balance, 
                 price, 
                 value: val
-                // No external icon URL generated here; frontend handles local icons
             };
         });
+
+        // Sort by value (highest first)
+        enrichedAssets.sort((a, b) => b.value - a.value);
 
         res.json({ totalValue, changePercent: 0, assets: enrichedAssets, history: [] });
 
@@ -416,22 +349,16 @@ const getMarketData = async (req, res) => {
     }
 };
 
-// --- PYTHON ENGINE INTEGRATION ---
-
-// @desc    Execute Trade Signal (Webhook from Python)
+// --- PYTHON INTEGRATION ---
 const executeTradeSignal = async (req, res) => {
     const { secret, userId, exchange: exchangeName, symbol, side, amount, type } = req.body;
-
-    if (secret !== BOT_SECRET) {
-        return res.status(401).json({ message: "Unauthorized Bot Secret" });
-    }
+    if (secret !== BOT_SECRET) return res.status(401).json({ message: "Unauthorized Bot Secret" });
 
     try {
         const keysQuery = await pool.query(
             'SELECT * FROM user_exchanges WHERE user_id = $1 AND exchange_name = $2 LIMIT 1',
             [userId, exchangeName]
         );
-
         if (keysQuery.rows.length === 0) return res.status(404).json({ message: "Keys not found" });
 
         const exchangeData = keysQuery.rows[0];
@@ -444,24 +371,18 @@ const executeTradeSignal = async (req, res) => {
 
         console.log(`[Python Signal] ${side.toUpperCase()} ${symbol} for User ${userId}`);
         res.json({ success: true, orderId: order.id, details: order });
-
     } catch (err) {
         console.error("Signal Error:", err.message);
         res.status(500).json({ message: err.message });
     }
 };
 
-// @desc    Run Backtest (Proxy to Python)
 const runBacktest = async (req, res) => {
     try {
-        // Destructure all config including endDate
         const { pair, startDate, endDate, capital, upperPrice, lowerPrice, gridSize } = req.body;
-
         const response = await axios.post(`${TRADING_ENGINE_URL}/backtest`, {
-            exchange: 'binance', 
-            pair, startDate, endDate, capital, upperPrice, lowerPrice, gridSize
+            exchange: 'binance', pair, startDate, endDate, capital, upperPrice, lowerPrice, gridSize
         });
-
         res.json(response.data);
     } catch (err) {
         console.error("Backtest Proxy Error:", err.message);
@@ -469,38 +390,11 @@ const runBacktest = async (req, res) => {
     }
 };
 
-// @desc    Get Backtest History
-const getBacktests = async (req, res) => {
-    try {
-        // Implement DB query if you start saving backtests
-        res.json([]);
-    } catch (err) {
-        res.status(500).send('Server Error');
-    }
-};
-
-// @desc    Save Backtest
-const saveBacktest = async (req, res) => {
-    res.json({ message: "Backtest saved" });
-};
+const getBacktests = async (req, res) => { res.json([]); };
+const saveBacktest = async (req, res) => { res.json({ message: "Backtest saved" }); };
 
 module.exports = { 
-    getMe, 
-    updateProfile, 
-    addExchange, 
-    createBot, 
-    updateBot, 
-    deleteBot,
-    getAvailableBots, 
-    authExchange, 
-    authExchangeCallback, 
-    getDashboard, 
-    getPortfolio, 
-    calculateUserTotalValue,
-    getUserBots,
-    getMarketData, 
-    executeTradeSignal, 
-    runBacktest,        
-    getBacktests,  
-    saveBacktest   
+    getMe, updateProfile, addExchange, createBot, updateBot, deleteBot, getAvailableBots, 
+    authExchange, authExchangeCallback, getDashboard, getPortfolio, 
+    getUserBots, getMarketData, executeTradeSignal, runBacktest, getBacktests, saveBacktest   
 };
