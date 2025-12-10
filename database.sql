@@ -70,5 +70,21 @@ ALTER TABLE users ADD COLUMN role VARCHAR(20) DEFAULT 'user';
 -- Set your specific user as admin manually
 UPDATE users SET role = 'admin' WHERE email = 'your_email@example.com';
 
+CREATE TABLE portfolio_snapshots (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    total_value NUMERIC(20, 2),
+    assets JSONB,
+    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- IMPORTANT: Insert System Bot Templates (Required for Backtest dropdown)
+INSERT INTO bots (user_id, bot_name, quote_currency, bot_type, description, status, config)
+VALUES 
+(1, 'Spot Grid', 'USDT', 'GRID', 'Classic buy low sell high.', 'active', '{"upperPrice": 60000, "lowerPrice": 30000, "gridSize": 20}'),
+(1, 'Spot DCA', 'USDT', 'DCA', 'Dollar Cost Averaging.', 'active', '{"baseOrder": 100, "safetyOrder": 200}');
+
+
+
 
 
