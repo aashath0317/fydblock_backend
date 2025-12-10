@@ -5,28 +5,27 @@ const axios = require('axios');
 const ccxt = require('ccxt');
 const { encrypt, decrypt } = require('../utils/encryption');
 
-// --- GLOBAL CACHE (For Prices) ---
+// --- GLOBAL VARIABLES ---
 let priceCache = { data: {}, lastFetch: 0 };
+const TRADING_ENGINE_URL = process.env.TRADING_ENGINE_URL || 'http://localhost:8000';
+const BOT_SECRET = process.env.BOT_SECRET || 'my_super_secure_bot_secret_123';
 
-// --- HELPER: FETCH PRICES WITH CACHING ---
+// 1. Fetch Crypto Prices (Cached)
 const fetchTokenPrices = async (symbols) => {
     if (symbols.length === 0) return {};
     
-    // 1. Check Cache (1 minute duration)
-    const CACHE_DURATION = 60 * 1000;
+    const CACHE_DURATION = 60 * 1000; // 1 minute
     const now = Date.now();
 
     if (now - priceCache.lastFetch < CACHE_DURATION && Object.keys(priceCache.data).length > 0) {
         return priceCache.data;
     }
 
-    // 2. Comprehensive Map for CoinGecko IDs
     const symbolMap = {
         'BTC': 'bitcoin', 'ETH': 'ethereum', 'USDT': 'tether', 'SOL': 'solana',
         'BNB': 'binancecoin', 'XRP': 'ripple', 'ADA': 'cardano', 'DOGE': 'dogecoin',
         'USDC': 'usd-coin', 'DOT': 'polkadot', 'MATIC': 'matic-network', 'LTC': 'litecoin',
-        'AVAX': 'avalanche-2', 'TRX': 'tron', 'SHIB': 'shiba-inu', 'LINK': 'chainlink',
-        'ATOM': 'cosmos', 'UNI': 'uniswap', 'NEAR': 'near', 'ALGO': 'algorand'
+        'AVAX': 'avalanche-2', 'TRX': 'tron', 'SHIB': 'shiba-inu', 'LINK': 'chainlink'
     };
 
     const assetIds = symbols.map(s => symbolMap[s] || s.toLowerCase()).join(',');
@@ -35,20 +34,17 @@ const fetchTokenPrices = async (symbols) => {
         const url = `https://api.coingecko.com/api/v3/simple/price?ids=${assetIds}&vs_currencies=usd&include_24hr_change=true`;
         const res = await axios.get(url);
         
-        // Update Cache
         priceCache.data = res.data;
         priceCache.lastFetch = now;
-        
         return res.data;
     } catch (err) {
         console.error("CoinGecko Error:", err.message);
-        return priceCache.data || {}; // Return stale cache if API fails
+        return priceCache.data || {};
     }
 };
 
-// --- HELPER: CALCULATE TOTAL VALUE (Used by Cron & API) ---
+// 2. Calculate Total User Portfolio Value
 const calculateUserTotalValue = async (userId) => {
-    // 1. Get User Keys
     const keysQuery = await pool.query(
         'SELECT * FROM user_exchanges WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
         [userId]
@@ -68,7 +64,6 @@ const calculateUserTotalValue = async (userId) => {
     });
 
     try {
-        // 2. Fetch Balance
         const tradingBalance = await exchange.fetchBalance();
         let balances = {};
         
@@ -78,7 +73,7 @@ const calculateUserTotalValue = async (userId) => {
             }
         }
 
-        // OKX Funding Logic
+        // Add Funding Account Balance (specific to OKX/KuCoin)
         if (exchangeId === 'okx') {
             try {
                 const fundingBalance = await exchange.fetchBalance({ type: 'funding' });
@@ -93,17 +88,13 @@ const calculateUserTotalValue = async (userId) => {
         const assetsList = Object.entries(balances).map(([symbol, balance]) => ({ symbol, balance }));
         if (assetsList.length === 0) return 0;
 
-        // 3. Get Prices & Sum
         const symbols = assetsList.map(a => a.symbol);
         const prices = await fetchTokenPrices(symbols);
         let totalValue = 0;
 
-        // Re-declare map here for local usage
         const symbolMap = { 
             'BTC': 'bitcoin', 'ETH': 'ethereum', 'USDT': 'tether', 'SOL': 'solana', 
-            'BNB': 'binancecoin', 'XRP': 'ripple', 'ADA': 'cardano', 'DOGE': 'dogecoin',
-            'USDC': 'usd-coin', 'DOT': 'polkadot', 'MATIC': 'matic-network', 'LTC': 'litecoin',
-            'AVAX': 'avalanche-2', 'TRX': 'tron', 'SHIB': 'shiba-inu', 'LINK': 'chainlink'
+            'BNB': 'binancecoin', 'XRP': 'ripple', 'ADA': 'cardano'
         };
 
         assetsList.forEach(asset => {
@@ -115,18 +106,14 @@ const calculateUserTotalValue = async (userId) => {
         return totalValue;
 
     } catch (err) {
-        if (err instanceof ccxt.AuthenticationError) {
-            console.error(`Calc Error User ${userId}: Invalid API Keys`);
-        } else if (err instanceof ccxt.NetworkError) {
-            console.error(`Calc Error User ${userId}: Network Issue`);
-        } else {
-            console.error(`Calc Error User ${userId}:`, err.message);
-        }
+        console.error(`Calc Error User ${userId}:`, err.message);
         return 0;
     }
 };
 
-// --- CONTROLLERS ---
+// ============================================================
+// CONTROLLERS
+// ============================================================
 
 // @desc    Get current user profile
 const getMe = async (req, res) => {
@@ -141,7 +128,8 @@ const getMe = async (req, res) => {
         }
 
         const user = userQuery.rows[0];
-        const botQuery = await pool.query('SELECT * FROM bots WHERE user_id = $1', [req.user.id]);
+        // Filter out SKIPPED bots so user appears "new" if they skipped setup
+        const botQuery = await pool.query("SELECT * FROM bots WHERE user_id = $1 AND bot_type != 'SKIPPED'", [req.user.id]);
         const exchangeQuery = await pool.query('SELECT 1 FROM user_exchanges WHERE user_id = $1 LIMIT 1', [req.user.id]);
 
         res.json({
@@ -172,19 +160,16 @@ const updateProfile = async (req, res) => {
     }
 };
 
-// @desc    Add Exchange Key (Manual Connection)
+// @desc    Add Exchange Key
 const addExchange = async (req, res) => {
     const { exchange_name, api_key, api_secret, passphrase } = req.body;
 
     try {
         const exchangeId = exchange_name.toLowerCase();
+        // Validation connection using CCXT
         if (ccxt[exchangeId]) {
-            const exchange = new ccxt[exchangeId]({
-                apiKey: api_key,
-                secret: api_secret,
-                password: passphrase
-            });
-            // Optional: await exchange.fetchBalance(); 
+            const exchange = new ccxt[exchangeId]({ apiKey: api_key, secret: api_secret, password: passphrase });
+            // await exchange.fetchBalance(); // Optional: Test connection
         }
 
         const encryptedKey = encrypt(api_key);
@@ -203,70 +188,22 @@ const addExchange = async (req, res) => {
     }
 };
 
-// @desc    Redirect user to Exchange OAuth Page
+// @desc    Redirect to OAuth
 const authExchange = (req, res) => {
-    const { exchange } = req.params;
-    const { token } = req.query;
-
-    let userId;
-    try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        userId = decoded.id;
-    } catch (e) {
-        return res.status(401).send("Unauthorized request");
-    }
-
-    const callbackUrl = `${process.env.API_BASE_URL}/user/exchange/callback/${exchange}`;
-    let redirectUrl = "";
-
-    if (exchange === 'binance') {
-        const clientId = process.env.BINANCE_OAUTH_CLIENT_ID;
-        redirectUrl = `https://accounts.binance.com/oauth/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(callbackUrl)}&state=${userId}`;
-    } else if (exchange === 'okx') {
-        const clientId = process.env.OKX_OAUTH_CLIENT_ID;
-        redirectUrl = `https://www.okx.com/account/users/authorization?client_id=${clientId}&response_type=code&redirect_uri=${encodeURIComponent(callbackUrl)}&state=${userId}`;
-    }
-
-    if (redirectUrl) {
-        res.redirect(redirectUrl);
-    } else {
-        res.status(400).send("Exchange OAuth not supported yet for " + exchange);
-    }
+    // ... (Implementation depends on specific exchange OAuth flow)
+    res.status(501).json({ message: "Not implemented yet" });
 };
 
-// @desc    Handle callback from Exchange
 const authExchangeCallback = async (req, res) => {
-    const { exchange } = req.params;
-    const { code, state } = req.query;
-
-    if (!code || !state) return res.status(400).send("Invalid callback data");
-
-    try {
-        const access_token = "mock_access_token_" + code.substring(0, 10);
-        const refresh_token = "mock_refresh_token_" + code.substring(0, 10);
-
-        await pool.query(
-            'INSERT INTO user_exchanges (user_id, exchange_name, access_token, refresh_token, connection_type) VALUES ($1, $2, $3, $4, $5)',
-            [state, exchange, access_token, refresh_token, 'oauth']
-        );
-
-        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
-        res.redirect(`${frontendUrl}/bot-builder?step=3`);
-
-    } catch (err) {
-        console.error(err);
-        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
-        res.redirect(`${frontendUrl}/bot-builder?error=oauth_failed`);
-    }
+    // ... (Implementation depends on specific exchange OAuth flow)
+    res.redirect(`${process.env.FRONTEND_URL}/dashboard`);
 };
 
-// @desc    Create Bot & Subscription
-// ✅ UPDATED: To accept description, config, icon, and status from dashboard/admin
+// @desc    Create Bot
 const createBot = async (req, res) => {
     const { bot_name, quote_currency, bot_type, plan, billing_cycle, description, config, icon, status } = req.body;
 
     try {
-        // 1. Create Subscription (Only if plan is provided)
         if (plan) {
             await pool.query(
                 'INSERT INTO subscriptions (user_id, plan_type, billing_cycle) VALUES ($1, $2, $3)',
@@ -274,32 +211,25 @@ const createBot = async (req, res) => {
             );
         }
 
-        // 2. Get Exchange Connection
         const exchange = await pool.query(
             'SELECT exchange_id FROM user_exchanges WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
             [req.user.id]
         );
-        
         const exchangeId = exchange.rows.length > 0 ? exchange.rows[0].exchange_id : null;
 
-        // 3. Create Bot with Extended Fields (Including Icon)
         const newBot = await pool.query(
             `INSERT INTO bots 
             (user_id, exchange_connection_id, bot_name, quote_currency, bot_type, status, description, config, icon_url) 
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) 
             RETURNING *`,
             [
-                req.user.id, 
-                exchangeId, 
-                bot_name || 'My New Bot', 
-                quote_currency || 'USDT', 
-                bot_type, 
-                status || 'ready', 
-                description,
-                config, // Saves the parameter JSON
-                icon    // Saves the Base64 image string
+                req.user.id, exchangeId, bot_name || 'My New Bot', quote_currency || 'USDT', 
+                bot_type, status || 'ready', description, config, icon
             ]
         );
+
+        // Optional: If status is 'active', trigger the Python engine here
+        // if (status === 'active') { await startPythonBot(newBot.rows[0]); }
 
         res.json(newBot.rows[0]);
     } catch (err) {
@@ -308,28 +238,18 @@ const createBot = async (req, res) => {
     }
 };
 
-// @desc    Update an existing Bot
+// @desc    Update Bot (Config & Icon)
 const updateBot = async (req, res) => {
     const { id } = req.params;
     const { bot_name, bot_type, status, description, config, icon } = req.body;
 
     try {
-        // ✅ Updates bot details including the icon (Base64)
         const updatedBot = await pool.query(
             `UPDATE bots 
              SET bot_name = $1, bot_type = $2, status = $3, description = $4, config = $5, icon_url = $6
              WHERE bot_id = $7 AND user_id = $8
              RETURNING *`,
-            [
-                bot_name, 
-                bot_type, 
-                status, 
-                description, 
-                config, // JSON string
-                icon,   // Base64 string
-                id, 
-                req.user.id
-            ]
+            [bot_name, bot_type, status, description, config, icon, id, req.user.id]
         );
 
         if (updatedBot.rows.length === 0) {
@@ -343,11 +263,17 @@ const updateBot = async (req, res) => {
     }
 };
 
-// @desc    Delete a Bot
+// @desc    Delete Bot
 const deleteBot = async (req, res) => {
     try {
         const { id } = req.params;
         
+        // 1. Optional: Tell Python engine to stop
+        try {
+            await axios.post(`${TRADING_ENGINE_URL}/stop/${id}`);
+        } catch (e) { console.log("Engine stop signal failed (bot might not be running)"); }
+
+        // 2. Delete from DB
         const result = await pool.query(
             'DELETE FROM bots WHERE bot_id = $1 AND user_id = $2 RETURNING *',
             [id, req.user.id]
@@ -364,30 +290,11 @@ const deleteBot = async (req, res) => {
     }
 };
 
-// @desc    Get Available System Bots (Templates created by Admin)
-const getAvailableBots = async (req, res) => {
-    try {
-        // Fetch active bots created by users with the 'admin' role
-        const query = `
-            SELECT b.* FROM bots b
-            JOIN users u ON b.user_id = u.id
-            WHERE u.role = 'admin' AND b.status = 'active'
-            ORDER BY b.created_at DESC
-        `;
-        
-        const result = await pool.query(query);
-        res.json(result.rows);
-    } catch (err) {
-        console.error(err.message);
-        res.status(500).send('Server Error');
-    }
-};
-
-// @desc    Get Dashboard Data
+// @desc    Get Dashboard Data (Excludes Skipped Bots)
 const getDashboard = async (req, res) => {
     try {
         const botsQuery = await pool.query(
-            'SELECT * FROM bots WHERE user_id = $1 ORDER BY created_at DESC',
+            "SELECT * FROM bots WHERE user_id = $1 AND bot_type != 'SKIPPED' ORDER BY created_at DESC",
             [req.user.id]
         );
 
@@ -404,10 +311,49 @@ const getDashboard = async (req, res) => {
     }
 };
 
-// @desc    Get Real-Time Portfolio + History
+// @desc    Get All User Bots (Excludes Skipped Bots)
+const getUserBots = async (req, res) => {
+    try {
+        const botsQuery = await pool.query(
+            "SELECT * FROM bots WHERE user_id = $1 AND status != 'archived' AND bot_type != 'SKIPPED' ORDER BY created_at DESC",
+            [req.user.id]
+        );
+
+        // Add mock performance data for UI visualization
+        const enrichedBots = botsQuery.rows.map(bot => ({
+            ...bot,
+            total_profit: (Math.random() * 100).toFixed(2),
+            invested_capital: (Math.random() * 1000 + 100).toFixed(2),
+            is_running: bot.status === 'running' || bot.status === 'active'
+        }));
+
+        res.json(enrichedBots);
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+};
+
+// @desc    Get System Bots (Available Bots created by Admin)
+const getAvailableBots = async (req, res) => {
+    try {
+        const query = `
+            SELECT b.* FROM bots b
+            JOIN users u ON b.user_id = u.id
+            WHERE u.role = 'admin' AND b.status = 'active'
+            ORDER BY b.created_at DESC
+        `;
+        const result = await pool.query(query);
+        res.json(result.rows);
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+};
+
+// @desc    Get Portfolio Data
 const getPortfolio = async (req, res) => {
     try {
-        // 1. Get Real-Time Assets
         const keysQuery = await pool.query('SELECT * FROM user_exchanges WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1', [req.user.id]);
         if (keysQuery.rows.length === 0) return res.json({ totalValue: 0, changePercent: 0, assets: [], history: [] });
 
@@ -422,197 +368,127 @@ const getPortfolio = async (req, res) => {
         const exchange = new ccxt[exchangeId]({ apiKey, secret: apiSecret, password, enableRateLimit: true });
         
         let balances = {};
-        
         try {
             const trading = await exchange.fetchBalance();
             if (trading.total) Object.entries(trading.total).forEach(([s, a]) => { if (a > 0) balances[s] = a; });
-            
-            if (exchangeId === 'okx') {
-                const funding = await exchange.fetchBalance({ type: 'funding' });
-                if (funding.total) Object.entries(funding.total).forEach(([s, a]) => { balances[s] = (balances[s] || 0) + a; });
-            }
         } catch (e) {
-            console.error("Portfolio Fetch Error:", e.message);
-            if (e instanceof ccxt.AuthenticationError) {
-                return res.status(401).json({ message: 'Invalid API Keys. Please check your exchange connection.' });
-            } else if (e instanceof ccxt.NetworkError) {
-                return res.status(503).json({ message: 'Exchange is currently unreachable. Please try again later.' });
-            } else if (e instanceof ccxt.RateLimitExceeded) {
-                 return res.status(429).json({ message: 'Rate limit exceeded. Please try again later.' });
-            }
-            return res.status(500).json({ message: 'Error fetching portfolio data from exchange.' });
+            return res.status(500).json({ message: 'Error fetching balance' });
         }
 
         const assetsList = Object.entries(balances).map(([s, b]) => ({ symbol: s, balance: b }));
         const prices = await fetchTokenPrices(assetsList.map(a => a.symbol));
 
         let totalValue = 0;
-        let previousTotalValue = 0;
-        
-        const symbolMap = { 
-            'BTC': 'bitcoin', 'ETH': 'ethereum', 'USDT': 'tether', 'SOL': 'solana', 
-            'BNB': 'binancecoin', 'XRP': 'ripple', 'ADA': 'cardano', 'DOGE': 'dogecoin',
-            'USDC': 'usd-coin', 'DOT': 'polkadot', 'MATIC': 'matic-network', 'LTC': 'litecoin',
-            'AVAX': 'avalanche-2', 'TRX': 'tron', 'SHIB': 'shiba-inu', 'LINK': 'chainlink',
-            'ATOM': 'cosmos', 'UNI': 'uniswap'
-        };
-
         const enrichedAssets = assetsList.map(asset => {
-            const coinId = symbolMap[asset.symbol] || asset.symbol.toLowerCase();
-            const priceData = prices[coinId] || { usd: 0, usd_24h_change: 0 };
-            
-            const currentPrice = priceData.usd;
-            const change24h = priceData.usd_24h_change || 0;
-            const val = asset.balance * currentPrice;
-            
+            const price = prices[asset.symbol.toLowerCase()]?.usd || 0;
+            const val = asset.balance * price;
             totalValue += val;
-            
-            if (change24h !== 0) {
-                const prevPrice = currentPrice / (1 + (change24h / 100));
-                previousTotalValue += asset.balance * prevPrice;
-            } else {
-                previousTotalValue += val;
-            }
-
             return {
-                id: asset.symbol, symbol: asset.symbol, name: asset.symbol,
-                balance: asset.balance, price: currentPrice, value: val,
-                change: change24h,
-                icon: `https://cryptologos.cc/logos/${coinId}-${asset.symbol.toLowerCase()}-logo.png`
+                symbol: asset.symbol, balance: asset.balance, price, value: val,
+                icon: `https://cryptologos.cc/logos/${asset.symbol.toLowerCase()}-${asset.symbol.toLowerCase()}-logo.png`
             };
-        }).filter(a => a.value > 1).sort((a, b) => b.value - a.value);
-
-        const changePercent = previousTotalValue > 0 ? ((totalValue - previousTotalValue) / previousTotalValue) * 100 : 0;
-
-        const historyQuery = await pool.query(
-            `SELECT total_value FROM portfolio_snapshots 
-             WHERE user_id = $1 AND recorded_at >= NOW() - INTERVAL '24 HOURS' 
-             ORDER BY recorded_at ASC`,
-            [req.user.id]
-        );
-
-        let history = historyQuery.rows.map(r => parseFloat(r.total_value));
-
-        if (history.length === 0) {
-            history = [totalValue]; 
-        } else {
-            history.push(totalValue);
-        }
-
-        res.json({
-            totalValue,
-            changePercent,
-            assets: enrichedAssets,
-            history: history 
         });
 
+        res.json({ totalValue, changePercent: 0, assets: enrichedAssets, history: [] });
     } catch (err) {
         console.error(err);
         res.status(500).send('Server Error');
     }
 };
 
-// @desc    Get All User Bots with Performance Data
-const getUserBots = async (req, res) => {
-    try {
-        const botsQuery = await pool.query(
-            'SELECT * FROM bots WHERE user_id = $1 AND status != \'archived\' ORDER BY created_at DESC',
-            [req.user.id]
-        );
-
-        const enrichedBots = botsQuery.rows.map(bot => {
-            const isPositive = Math.random() > 0.3;
-            const totalProfit = (Math.random() * 5000).toFixed(2);
-            const invested = (Math.random() * 5000 + 1000).toFixed(2);
-            const chartData = Array.from({ length: 10 }, () => Math.floor(Math.random() * 100));
-
-            return {
-                ...bot,
-                total_profit: isPositive ? totalProfit : -totalProfit,
-                invested_capital: invested,
-                chart_data: chartData,
-                is_running: bot.status === 'running' || bot.status === 'active'
-            };
-        });
-
-        res.json(enrichedBots);
-    } catch (err) {
-        console.error(err.message);
-        res.status(500).send('Server Error');
-    }
-};
-
-// @desc    Get Public Market Data (Order Book)
+// @desc    Get Public Market Data
 const getMarketData = async (req, res) => {
     const { exchange: exchangeId, symbol } = req.query;
-
-    if (!exchangeId || !symbol) {
-        return res.status(400).json({ message: 'Missing exchange or symbol' });
-    }
+    if (!exchangeId || !symbol) return res.status(400).json({ message: 'Missing parameters' });
 
     try {
-        if (!ccxt[exchangeId.toLowerCase()]) {
-            return res.status(400).json({ message: 'Exchange not supported' });
-        }
-
+        if (!ccxt[exchangeId.toLowerCase()]) return res.status(400).json({ message: 'Exchange not supported' });
         const exchange = new ccxt[exchangeId.toLowerCase()]();
-        
-        let formattedSymbol = symbol;
-        if (!symbol.includes('/')) {
-            if (symbol.endsWith('USDT')) formattedSymbol = symbol.replace('USDT', '/USDT');
-            else if (symbol.endsWith('USD')) formattedSymbol = symbol.replace('USD', '/USD');
-            else if (symbol.endsWith('BTC')) formattedSymbol = symbol.replace('BTC', '/BTC');
-        }
-
-        const orderBook = await exchange.fetchOrderBook(formattedSymbol, 10); 
-
-        res.json({
-            symbol: formattedSymbol,
-            bids: orderBook.bids,
-            asks: orderBook.asks,
-            timestamp: Date.now()
-        });
-
+        const orderBook = await exchange.fetchOrderBook(symbol, 10); 
+        res.json({ symbol, bids: orderBook.bids, asks: orderBook.asks, timestamp: Date.now() });
     } catch (err) {
-        console.error(`Market Data Error (${exchangeId}):`, err.message);
         res.status(500).json({ message: 'Failed to fetch market data' });
     }
 };
 
-// @desc    Get User Backtest History
+// --- PYTHON ENGINE INTEGRATION ---
+
+// @desc    Execute Trade Signal (Called BY Python Bot)
+const executeTradeSignal = async (req, res) => {
+    const { secret, userId, exchange: exchangeName, symbol, side, amount, type } = req.body;
+
+    if (secret !== BOT_SECRET) {
+        return res.status(401).json({ message: "Unauthorized: Invalid Bot Secret" });
+    }
+
+    try {
+        const keysQuery = await pool.query(
+            'SELECT * FROM user_exchanges WHERE user_id = $1 AND exchange_name = $2 LIMIT 1',
+            [userId, exchangeName]
+        );
+
+        if (keysQuery.rows.length === 0) return res.status(404).json({ message: "Exchange keys not found" });
+
+        const exchangeData = keysQuery.rows[0];
+        const exchangeId = exchangeData.exchange_name.toLowerCase();
+        const apiKey = decrypt(exchangeData.api_key);
+        const apiSecret = decrypt(exchangeData.api_secret);
+        const password = exchangeData.passphrase ? decrypt(exchangeData.passphrase) : undefined;
+
+        const exchange = new ccxt[exchangeId]({ apiKey, secret: apiSecret, password, enableRateLimit: true });
+        const order = await exchange.createOrder(symbol, type || 'market', side, amount);
+
+        console.log(`[Python Signal] Executed ${side} ${symbol} for User ${userId}`);
+        res.json({ success: true, orderId: order.id, details: order });
+
+    } catch (err) {
+        console.error("Signal Execution Error:", err.message);
+        res.status(500).json({ message: err.message });
+    }
+};
+
+// @desc    Run Backtest (Calls Python Engine)
+const runBacktest = async (req, res) => {
+    try {
+        const { pair, startDate, capital, upperPrice, lowerPrice, gridSize } = req.body;
+
+        const response = await axios.post(`${TRADING_ENGINE_URL}/backtest`, {
+            exchange: 'binance', 
+            pair, startDate, capital, upperPrice, lowerPrice, gridSize
+        });
+
+        res.json(response.data);
+    } catch (err) {
+        console.error("Backtest Error:", err.message);
+        res.status(500).json({ message: "Failed to run backtest simulation" });
+    }
+};
+
+// @desc    Get Backtest History
 const getBacktests = async (req, res) => {
     try {
-        const mockData = [
-            { id: 1, pair: 'SOL/USDT', strategy: 'Spot Grid', profit: 2350, date: 'Dec 6, 10:10 AM' },
-            { id: 2, pair: 'BTC/USDT', strategy: 'DCA', profit: -120, date: 'Dec 5, 2:30 PM' }
-        ];
-        res.json(mockData);
+        // Mock data for now, replace with DB query if you save results
+        res.json([
+            { id: 1, pair: 'SOL/USDT', strategy: 'Spot Grid', profit: 2350, date: 'Dec 6, 10:10 AM' }
+        ]);
     } catch (err) {
-        console.error(err);
         res.status(500).send('Server Error');
     }
 };
 
-// @desc    Save a Backtest Result
+// @desc    Save Backtest
 const saveBacktest = async (req, res) => {
-    try {
-        const { pair, strategy, profit, config } = req.body;
-        console.log("Saving backtest:", pair, profit);
-        res.json({ message: "Backtest saved successfully" });
-    } catch (err) {
-        console.error(err);
-        res.status(500).send('Server Error');
-    }
+    res.json({ message: "Backtest saved" });
 };
 
 module.exports = { 
     getMe, 
     updateProfile, 
     addExchange, 
-    createBot,
+    createBot, 
     updateBot, 
     deleteBot,
-    getAvailableBots, // Export new function
+    getAvailableBots, 
     authExchange, 
     authExchangeCallback, 
     getDashboard, 
@@ -620,6 +496,8 @@ module.exports = {
     calculateUserTotalValue,
     getUserBots,
     getMarketData, 
+    executeTradeSignal, // For Python -> Node
+    runBacktest,        // For Node -> Python
     getBacktests,  
     saveBacktest   
 };
