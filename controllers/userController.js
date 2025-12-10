@@ -183,14 +183,14 @@ const getDashboard = async (req, res) => {
             [req.user.id]
         );
 
-        // Simple placeholder stats
-        const dashboardStats = [
-            { title: "Today's Profit", value: "$0.00", percentage: "0.00%", isPositive: true },
-            { title: "30 Days Profit", value: "$0.00", percentage: "0.00%", isPositive: true },
-            { title: "Assets Value", value: "$0.00", percentage: "0.00%", isPositive: true },
-        ];
-
-        res.json({ stats: dashboardStats, bots: botsQuery.rows });
+        res.json({ 
+            stats: [
+                { title: "Today's Profit", value: "$0.00", percentage: "0.00%", isPositive: true },
+                { title: "30 Days Profit", value: "$0.00", percentage: "0.00%", isPositive: true },
+                { title: "Assets Value", value: "$0.00", percentage: "0.00%", isPositive: true },
+            ], 
+            bots: botsQuery.rows 
+        });
     } catch (err) {
         console.error(err.message);
         res.status(500).send('Server Error');
@@ -207,7 +207,7 @@ const getUserBots = async (req, res) => {
 
         const enrichedBots = botsQuery.rows.map(bot => ({
             ...bot,
-            total_profit: (Math.random() * 100).toFixed(2),
+            total_profit: (Math.random() * 100).toFixed(2), // Replace with real stats later
             invested_capital: (Math.random() * 1000 + 100).toFixed(2),
             is_running: bot.status === 'running' || bot.status === 'active'
         }));
@@ -236,7 +236,7 @@ const getAvailableBots = async (req, res) => {
     }
 };
 
-// @desc    Get Real-Time Portfolio (FIXED PRICE FETCHING)
+// @desc    Get Real-Time Portfolio (Live Balance + DB History)
 const getPortfolio = async (req, res) => {
     try {
         // 1. Get Keys
@@ -255,7 +255,6 @@ const getPortfolio = async (req, res) => {
             apiSecret = decrypt(exchangeData.api_secret);
             password = exchangeData.passphrase ? decrypt(exchangeData.passphrase) : undefined;
         } catch (e) {
-            console.error("Decryption failed:", e);
             return res.status(500).json({ message: "Key Error" });
         }
 
@@ -263,7 +262,7 @@ const getPortfolio = async (req, res) => {
 
         const exchange = new ccxt[exchangeId]({ apiKey, secret: apiSecret, password, enableRateLimit: true });
         
-        // 2. Fetch Balance
+        // 2. Fetch Balance (Live from Exchange)
         let balances = {};
         try {
             const trading = await exchange.fetchBalance();
@@ -274,64 +273,126 @@ const getPortfolio = async (req, res) => {
             }
         } catch (e) {
             console.error("CCXT Balance Error:", e.message);
-            return res.json({ totalValue: 0, changePercent: 0, assets: [], history: [] });
+            // Even if fetch fails, try to show history from DB
         }
 
         const assetsList = Object.entries(balances).map(([s, b]) => ({ symbol: s, balance: b }));
-        if (assetsList.length === 0) return res.json({ totalValue: 0, changePercent: 0, assets: [], history: [] });
 
-        // 3. ✅ FETCH PRICES FROM EXCHANGE (Not CoinGecko)
-        // We create symbols like 'BTC/USDT', 'ETH/USDT' to get prices
+        // 3. Fetch Prices (Live from Exchange)
         let tickers = {};
         try {
             const symbolsToFetch = assetsList
-                .filter(a => a.symbol !== 'USDT' && a.symbol !== 'USDC') // Don't fetch price for stablecoins yet
+                .filter(a => !['USDT', 'USDC', 'BUSD', 'DAI'].includes(a.symbol.toUpperCase()))
                 .map(a => `${a.symbol}/USDT`);
             
             if (symbolsToFetch.length > 0) {
                 tickers = await exchange.fetchTickers(symbolsToFetch);
             }
-        } catch (e) {
-            console.error("CCXT Ticker Error:", e.message);
-            // Continue anyway, maybe we have stablecoins
-        }
+        } catch (e) { console.error("Ticker Error:", e.message); }
 
+        // 4. Calculate Total & Assets
         let totalValue = 0;
+        let totalPreviousValue = 0;
         
         const enrichedAssets = assetsList.map(asset => {
             let price = 0;
+            let change24h = 0;
 
-            // Stablecoin logic
             if (['USDT', 'USDC', 'DAI', 'BUSD'].includes(asset.symbol.toUpperCase())) {
                 price = 1.0;
             } else {
-                // Try to find price in tickers
                 const pair = `${asset.symbol}/USDT`;
                 if (tickers[pair]) {
                     price = tickers[pair].last;
+                    change24h = tickers[pair].percentage;
                 }
             }
             
             const val = asset.balance * price;
             totalValue += val;
+
+            // Estimate previous value for percentage calc
+            if (change24h !== undefined) {
+                const prevPrice = price / (1 + (change24h / 100));
+                totalPreviousValue += (asset.balance * prevPrice);
+            } else {
+                totalPreviousValue += val;
+            }
             
             return {
                 symbol: asset.symbol.toUpperCase(), 
                 balance: asset.balance, 
                 price, 
-                value: val
+                value: val,
+                change: change24h ? parseFloat(change24h.toFixed(2)) : 0
             };
         });
 
-        // Sort by value (highest first)
         enrichedAssets.sort((a, b) => b.value - a.value);
 
-        res.json({ totalValue, changePercent: 0, assets: enrichedAssets, history: [] });
+        let changePercent = 0;
+        if (totalPreviousValue > 0) {
+            changePercent = ((totalValue - totalPreviousValue) / totalPreviousValue) * 100;
+        }
+
+        // 5. GET CHART HISTORY (Using 'recorded_at')
+        let historyData = [];
+        try {
+            // Query the snapshots table
+            const historyQuery = await pool.query(
+                `SELECT total_value FROM portfolio_snapshots 
+                 WHERE user_id = $1 
+                 ORDER BY recorded_at DESC 
+                 LIMIT 24`, 
+                [req.user.id]
+            );
+
+            if (historyQuery.rows.length > 0) {
+                // Reverse to get [Oldest ... Newest]
+                historyData = historyQuery.rows.map(r => parseFloat(r.total_value)).reverse();
+            }
+        } catch (e) { 
+            console.error("DB History Error:", e.message);
+        }
+
+        // If we have live data, append it as the most recent point
+        if (totalValue > 0) {
+            historyData.push(totalValue);
+        }
+
+        // Fallback if DB is empty: Generate simulated line
+        if (historyData.length < 2) {
+            historyData = generateSimulatedChart(totalValue, changePercent);
+        }
+
+        res.json({ 
+            totalValue, 
+            changePercent: parseFloat(changePercent.toFixed(2)), 
+            assets: enrichedAssets, 
+            history: historyData 
+        });
 
     } catch (err) {
         console.error("Portfolio Error:", err);
         res.status(500).send('Server Error');
     }
+};
+
+// --- HELPER: Simulate Chart if no history ---
+const generateSimulatedChart = (currentValue, changePercent) => {
+    if (currentValue === 0) return [0, 0, 0, 0, 0];
+    const prevValue = currentValue / (1 + (changePercent / 100));
+    const points = 24;
+    const data = [];
+    for (let i = 0; i < points; i++) {
+        const progress = i / (points - 1);
+        const base = prevValue + (currentValue - prevValue) * progress;
+        const noise = (Math.random() - 0.5) * (currentValue * 0.01);
+        if (i === 0) data.push(prevValue);
+        else if (i === points - 1) data.push(currentValue);
+        else data.push(base + noise);
+    }
+    return data;
 };
 
 // @desc    Public Market Data
@@ -352,7 +413,7 @@ const getMarketData = async (req, res) => {
 // --- PYTHON INTEGRATION ---
 const executeTradeSignal = async (req, res) => {
     const { secret, userId, exchange: exchangeName, symbol, side, amount, type } = req.body;
-    if (secret !== BOT_SECRET) return res.status(401).json({ message: "Unauthorized Bot Secret" });
+    if (secret !== BOT_SECRET) return res.status(401).json({ message: "Unauthorized" });
 
     try {
         const keysQuery = await pool.query(
@@ -369,10 +430,8 @@ const executeTradeSignal = async (req, res) => {
         const exchange = new ccxt[exchangeData.exchange_name.toLowerCase()]({ apiKey, secret: apiSecret, password, enableRateLimit: true });
         const order = await exchange.createOrder(symbol, type || 'market', side, amount);
 
-        console.log(`[Python Signal] ${side.toUpperCase()} ${symbol} for User ${userId}`);
         res.json({ success: true, orderId: order.id, details: order });
     } catch (err) {
-        console.error("Signal Error:", err.message);
         res.status(500).json({ message: err.message });
     }
 };
@@ -385,7 +444,6 @@ const runBacktest = async (req, res) => {
         });
         res.json(response.data);
     } catch (err) {
-        console.error("Backtest Proxy Error:", err.message);
         res.status(500).json({ message: "Backtest simulation failed" });
     }
 };
