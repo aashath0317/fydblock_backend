@@ -142,5 +142,3 @@ pm2 save
 ## 📄 License
 
 **MIT License**
-
-Just tell me!
