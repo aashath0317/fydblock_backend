@@ -7,9 +7,9 @@ const {
     updateProfile, 
     addExchange, 
     createBot, 
-    updateBot, 
-    deleteBot, 
-    getAvailableBots, // ✅ Added import for getAvailableBots
+    updateBot,          // "Configure" button
+    deleteBot,          // "Delete" button
+    getAvailableBots,   // "Create New Bot" modal
     authExchange, 
     authExchangeCallback,
     getDashboard,
@@ -17,7 +17,9 @@ const {
     getUserBots,    
     getMarketData, 
     getBacktests,   
-    saveBacktest    
+    saveBacktest,
+    runBacktest,        // Sends request TO Python Engine
+    executeTradeSignal  // Receives signal FROM Python Engine
 } = require('../controllers/userController');
 
 const { protect } = require('../middleware/authMiddleware');
@@ -26,15 +28,17 @@ const { protect } = require('../middleware/authMiddleware');
 router.get('/me', protect, getMe);
 router.put('/profile', protect, updateProfile);
 
-// --- Exchange & Bot Management ---
+// --- Exchange Management ---
 router.post('/exchange', protect, addExchange);
-router.post('/bot', protect, createBot);
-router.get('/bots', protect, getUserBots);
-router.put('/bot/:id', protect, updateBot);
-router.delete('/bot/:id', protect, deleteBot); 
+router.get('/exchange/auth/:exchange', authExchange); 
+router.get('/exchange/callback/:exchange', authExchangeCallback);
 
-// ✅ Added Available Bots Route
-router.get('/available-bots', protect, getAvailableBots);
+// --- Bot Management ---
+router.get('/bots', protect, getUserBots);              // Get User's Active Bots
+router.get('/available-bots', protect, getAvailableBots); // Get System/Admin Bots
+router.post('/bot', protect, createBot);                // Create New Bot
+router.put('/bot/:id', protect, updateBot);             // Update/Configure Bot
+router.delete('/bot/:id', protect, deleteBot);          // Delete Bot
 
 // --- Dashboard & Portfolio ---
 router.get('/dashboard', protect, getDashboard);
@@ -46,9 +50,11 @@ router.get('/market-data', getMarketData);
 // --- Backtesting Routes ---
 router.get('/backtests', protect, getBacktests);
 router.post('/backtest/save', protect, saveBacktest);
+router.post('/backtest/run', protect, runBacktest); // Calls Python Backtester
 
-// --- Exchange OAuth Routes ---
-router.get('/exchange/auth/:exchange', authExchange); 
-router.get('/exchange/callback/:exchange', authExchangeCallback);
+// --- Python Engine Integration (Webhook) ---
+// This route is NOT protected by 'protect' because it's called by the Python script, not a user browser.
+// Security is handled inside the controller using BOT_SECRET.
+router.post('/bot-signal', executeTradeSignal);
 
 module.exports = router;
