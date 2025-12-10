@@ -1,111 +1,146 @@
-# FydBlock Backend
+# 🔥 FydBlock Backend API
 
-A Node.js and Express backend for FydBlock, featuring user authentication (Register/Login) with PostgreSQL.
+The core RESTful API powering the **FydBlock Crypto Trading Platform**.  
+Built with **Node.js**, **Express**, and **PostgreSQL**, this backend manages authentication, bot configuration, encrypted user API keys, and communicates with the **Python Trading Engine** to execute algorithmic trading strategies.
 
-## Features
+---
 
-- **RESTful API** built with Express.js  
-- **Database**: PostgreSQL  
-- **Authentication**: JSON Web Tokens (JWT) & bcryptjs for password hashing  
-- **Security**: CORS enabled, Environment variable protection  
-- **Dev Tools**: Nodemon for automatic server restarts  
+## 🏗️ System Architecture
 
-## Prerequisites
+This backend acts as the **Controller Layer** inside the FydBlock microservices ecosystem:
 
-Make sure the following are installed:
+1. **Frontend (React)** — Interface for users to create and monitor bots  
+2. **Backend API (Node.js)** — Handles authentication, database, encryption, and engine communication  
+3. **Trading Engine (Python)** — Independent async engine executing Grid/DCA strategies  
 
-- Node.js (v18+ recommended)  
-- PostgreSQL  
+---
 
-## Installation
+## 🚀 Tech Stack
+
+- **Runtime:** Node.js (v18+)  
+- **Framework:** Express.js  
+- **Database:** PostgreSQL + pg  
+- **Authentication:** JWT + Google OAuth  
+- **Crypto Library:** CCXT (balance & portfolio data)  
+- **Communication:** Axios (HTTP calls to Trading Engine)  
+- **Security:** AES Encryption for API Keys  
+
+---
+
+## 📋 Prerequisites
+
+- Node.js **v18+**  
+- PostgreSQL installed  
+- Python Trading Engine running on **port 8000**  
+
+---
+
+## 🛠️ Installation
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/aashath0317/fydblock_backend.git
+git clone https://github.com/yourusername/fydblock_backend.git
 cd fydblock_backend
 ```
 
-### 2. Install dependencies
+### 2. Install Dependencies
 ```bash
 npm install
 ```
 
-## Configuration
-
-### 1. Create a `.env` file in the project root  
-### 2. Add your configuration values:
+### 3. Configure Environment Variables  
+Create a `.env` file in the root:
 
 ```env
 PORT=5000
 
-# Database Configuration
-DB_USER=your_db_user
+# Database
+DB_USER=fydblock_user
 DB_PASSWORD=your_db_password
 DB_HOST=localhost
 DB_PORT=5432
 DB_NAME=fydblock_db
 
 # Security
-JWT_SECRET=your_super_secret_jwt_key
+JWT_SECRET=your_super_secret_key_change_this
+ENCRYPTION_KEY=32_char_hex_string_for_api_keys
+
+# Google OAuth
+GOOGLE_CLIENT_ID=your_google_client_id.apps.googleusercontent.com
+
+# Python Engine URL
+TRADING_ENGINE_URL=http://localhost:8000
 ```
 
-## Database Setup
-
-### 1. Create the database
-```sql
-CREATE DATABASE fydblock_db;
+### 4. Database Setup
+```bash
+psql -U postgres -d fydblock_db -f database.sql
 ```
 
-### 2. Create the `users` table
-```sql
-CREATE TABLE users (
-  id SERIAL PRIMARY KEY,
-  email VARCHAR(255) UNIQUE NOT NULL,
-  password VARCHAR(255) NOT NULL,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-```
+---
 
-## Usage
+## 🏃‍♂️ Running the Server
 
-### Development Mode
-Run with Nodemon:
+### Development Mode (Auto Reload)
 ```bash
 npm run dev
 ```
 
-*(Ensure `"dev": "nodemon index.js"` exists in `package.json`.)*
-
-### Production Mode
+### Production Mode (PM2)
 ```bash
-node server.js
+npm install -g pm2
+pm2 start server.js --name "fydblock-api"
+pm2 save
 ```
 
-Server will run at:  
-`http://localhost:5000`
+---
 
-## API Endpoints
+## 📡 API Endpoints
 
-### **Auth Routes**
-
-| Method | Endpoint | Description | Body |
-|--------|----------|-------------|-------|
-| POST | `/api/auth/register` | Register new user | `{ "email": "user@test.com", "password": "123" }` |
-| POST | `/api/auth/login` | Login & receive JWT | `{ "email": "user@test.com", "password": "123" }` |
-
-### **System Routes**
-
+### 🔐 Authentication
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/` | Returns "FydBlock API is running..." |
-| GET | `/test-db` | Tests database connection |
+| POST | `/api/auth/register` | Register a new user |
+| POST | `/api/auth/login` | Login and receive JWT |
+| POST | `/api/auth/google` | Login via Google OAuth |
 
-## Technologies Used
+---
 
-- Express.js  
-- PostgreSQL (pg)  
-- bcryptjs  
-- JSON Web Tokens (JWT)  
-- CORS  
-- dotenv  
+### 👤 User & Bots
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/user/me` | Fetch authenticated user |
+| POST | `/api/user/exchange` | Save encrypted API keys |
+| POST | `/api/user/bot` | Create bot (Triggers Python `/start`) |
+| GET | `/api/user/bots` | List user's bots |
+| PUT | `/api/user/bot/:id` | Update bot configuration |
+| DELETE | `/api/user/bot/:id` | Stop bot (Python `/stop`) and delete |
 
+---
+
+### 🛠️ Admin
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/admin/bots` | Manage system bot templates |
+| GET | `/api/admin/users` | View all registered users |
+
+---
+
+## 🤝 Integration Flow
+
+### When a user creates a bot:
+
+1. Frontend sends configuration → Backend  
+2. Backend saves bot in PostgreSQL  
+3. Backend decrypts user’s API keys internally  
+4. Backend sends `POST /start` → Python Trading Engine  
+5. Trading Engine launches async Grid/DCA loop  
+6. Bot begins live trading  
+
+---
+
+## 📄 License
+
+**MIT License**
+
+Just tell me!
