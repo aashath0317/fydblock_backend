@@ -1,144 +1,214 @@
-# 🔥 FydBlock Backend API
+# ⚡ FydBlock – AI Algorithmic Trading Ecosystem
 
-The core RESTful API powering the **FydBlock Crypto Trading Platform**.  
-Built with **Node.js**, **Express**, and **PostgreSQL**, this backend manages authentication, bot configuration, encrypted user API keys, and communicates with the **Python Trading Engine** to execute algorithmic trading strategies.
+FydBlock is a professional, full-stack crypto trading platform featuring automated **Grid & DCA trading bots**, a high-frequency **Python execution engine**, and a **real-time portfolio tracker** with historical performance logging.
 
 ---
 
 ## 🏗️ System Architecture
 
-This backend acts as the **Controller Layer** inside the FydBlock microservices ecosystem:
+The platform is structured into four synchronized microservices:
 
-1. **Frontend (React)** — Interface for users to create and monitor bots  
-2. **Backend API (Node.js)** — Handles authentication, database, encryption, and engine communication  
-3. **Trading Engine (Python)** — Independent async engine executing Grid/DCA strategies  
-
----
-
-## 🚀 Tech Stack
-
-- **Runtime:** Node.js (v18+)  
-- **Framework:** Express.js  
-- **Database:** PostgreSQL + pg  
-- **Authentication:** JWT + Google OAuth  
-- **Crypto Library:** CCXT (balance & portfolio data)  
-- **Communication:** Axios (HTTP calls to Trading Engine)  
-- **Security:** AES Encryption for API Keys  
+| Service | Technology | Description | Port |
+|--------|------------|-------------|------|
+| **Backend API** | Node.js / Express | REST API, Auth, Database & Exchange Connectivity | `5000` |
+| **Trading Engine** | Python / FastAPI | High-performance bot execution & backtesting engine | `8000` |
+| **User Platform** | React / Vite | Trader dashboard, portfolio & bot management | `5173` |
+| **Admin Panel** | React / Vite | System management, templates & analytics | `5174` |
 
 ---
 
-## 📋 Prerequisites
+## 🚀 Key Features
 
-- Node.js **v18+**  
-- PostgreSQL installed  
-- Python Trading Engine running on **port 8000**  
+- **Automated Trading:** Spot Grid & DCA bots powered by a Python engine.
+- **Backtesting Simulator:** “Time-travel” simulation using historical data.
+- **Real-Time Portfolio:** Live exchange balance tracking (Binance, Bybit, OKX).
+- **Local Asset Icons:** Fast, offline-ready crypto logo rendering.
+- **Secure Architecture:**  
+  - Encrypted API keys  
+  - Signed bot signals  
+  - Protected backend-to-engine communication  
 
 ---
 
-## 🛠️ Installation
+## 🛠️ Prerequisites
 
-### 1. Clone the repository
-```bash
-git clone https://github.com/yourusername/fydblock_backend.git
-cd fydblock_backend
+Install the following:
+
+- **Node.js** (v18+)
+- **Python** (v3.10+)
+- **PostgreSQL** (v14+)
+- **PM2** (Global)  
+  ```bash
+  npm install -g pm2
+  ```
+
+---
+
+## 📦 Installation & Setup
+
+---
+
+## 1️⃣ Database Setup
+
+Create the database:
+
+```sql
+CREATE DATABASE fydblock_db;
 ```
 
-### 2. Install Dependencies
+Run your schema files, then **add required portfolio & template tables**:
+
+```sql
+-- Portfolio History Table
+CREATE TABLE portfolio_snapshots (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+    total_value NUMERIC(20, 2),
+    assets JSONB,
+    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- System Bot Templates
+INSERT INTO bots (user_id, bot_name, quote_currency, bot_type, description, status, config)
+VALUES 
+(1, 'Spot Grid', 'USDT', 'GRID', 'Classic buy low sell high.', 'active',
+ '{"upperPrice": 60000, "lowerPrice": 30000, "gridSize": 20}'),
+(1, 'Spot DCA', 'USDT', 'DCA', 'Dollar Cost Averaging.', 'active',
+ '{"baseOrder": 100, "safetyOrder": 200}');
+```
+
+---
+
+## 2️⃣ Backend API (Node.js)
+
 ```bash
+cd fydblock_backend
 npm install
 ```
 
-### 3. Configure Environment Variables  
-Create a `.env` file in the root:
+Create a `.env` file:
 
 ```env
 PORT=5000
-
-# Database
-DB_USER=fydblock_user
-DB_PASSWORD=your_db_password
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=fydblock_db
-
-# Security
-JWT_SECRET=your_super_secret_key_change_this
-ENCRYPTION_KEY=32_char_hex_string_for_api_keys
-
-# Google OAuth
-GOOGLE_CLIENT_ID=your_google_client_id.apps.googleusercontent.com
-
-# Python Engine URL
+DB_URL=postgres://user:pass@localhost:5432/fydblock_db
+JWT_SECRET=your_jwt_secret
+BOT_SECRET=my_super_secure_bot_secret_123
 TRADING_ENGINE_URL=http://localhost:8000
+FRONTEND_URL=http://localhost:5173
 ```
 
-### 4. Database Setup
-```bash
-psql -U postgres -d fydblock_db -f database.sql
-```
+Start server:
 
----
-
-## 🏃‍♂️ Running the Server
-
-### Development Mode (Auto Reload)
 ```bash
 npm run dev
 ```
 
-### Production Mode (PM2)
+---
+
+## 3️⃣ Trading Engine (Python)
+
 ```bash
-npm install -g pm2
-pm2 start server.js --name "fydblock-api"
-pm2 save
+cd fydblock_engine
+python3 -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+```
+
+Install dependencies:
+
+```bash
+pip install fastapi uvicorn ccxt pandas numpy pydantic
+```
+
+Run engine:
+
+```bash
+uvicorn bot_engine:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ---
 
-## 📡 API Endpoints
+## 4️⃣ User Frontend (React)
 
-### 🔐 Authentication
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/auth/register` | Register a new user |
-| POST | `/api/auth/login` | Login and receive JWT |
-| POST | `/api/auth/google` | Login via Google OAuth |
+```bash
+cd fydblock_user
+npm install
+```
 
----
+Add crypto icons:
 
-### 👤 User & Bots
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/user/me` | Fetch authenticated user |
-| POST | `/api/user/exchange` | Save encrypted API keys |
-| POST | `/api/user/bot` | Create bot (Triggers Python `/start`) |
-| GET | `/api/user/bots` | List user's bots |
-| PUT | `/api/user/bot/:id` | Update bot configuration |
-| DELETE | `/api/user/bot/:id` | Stop bot (Python `/stop`) and delete |
+```
+public/icons/
+  ├── btc.svg
+  ├── eth.svg
+  ├── usdt.svg
+  └── ...
+```
 
----
+Start:
 
-### 🛠️ Admin
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/admin/bots` | Manage system bot templates |
-| GET | `/api/admin/users` | View all registered users |
+```bash
+npm run dev
+```
 
 ---
 
-## 🤝 Integration Flow
+## 🏃‍♂️ Production Deployment (PM2)
 
-### When a user creates a bot:
+Create **ecosystem.config.js** in root:
 
-1. Frontend sends configuration → Backend  
-2. Backend saves bot in PostgreSQL  
-3. Backend decrypts user’s API keys internally  
-4. Backend sends `POST /start` → Python Trading Engine  
-5. Trading Engine launches async Grid/DCA loop  
-6. Bot begins live trading  
+```javascript
+module.exports = {
+  apps: [
+    {
+      name: "fyd-backend",
+      script: "./fydblock_backend/server.js",
+      env: { NODE_ENV: "production", PORT: 5000 }
+    },
+    {
+      name: "fyd-engine",
+      script: "uvicorn",
+      args: "bot_engine:app --host 0.0.0.0 --port 8000",
+      cwd: "./fydblock_engine",
+      interpreter: "./fydblock_engine/venv/bin/python"
+    }
+  ]
+};
+```
+
+Start everything:
+
+```bash
+pm2 start ecosystem.config.js
+pm2 save
+pm2 startup
+```
+
+---
+
+## ❓ Troubleshooting
+
+### 1. **Portfolio shows $0.00**
+- Add API keys in *Settings*.
+- Check backend logs:
+  ```bash
+  pm2 logs fyd-backend
+  ```
+- Ensure server can reach Binance/Bybit/OKX.
+
+### 2. **Backtest chart is empty**
+- Confirm Python engine is running.
+- Ensure selected date range contains data.
+
+### 3. **Python Environment Externally Managed**
+- Don't install globally.  
+- Always activate venv:
+  ```bash
+  source venv/bin/activate
+  ```
 
 ---
 
 ## 📄 License
 
-**MIT License**
+© 2025 FydBlock — All Rights Reserved.
+
