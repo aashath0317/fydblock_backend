@@ -1,57 +1,57 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
-const cron = require('node-cron'); // Import Cron
-const authRoutes = require('./routes/authRoutes');
-const pool = require('./db');
-const userRoutes = require('./routes/userRoutes');
-const { calculateUserTotalValue } = require('./controllers/userController'); // Import helper
-const adminRoutes = require('./routes/adminRoutes');
-const partnerRoutes = require('./routes/partnerRoutes');
+const cron = require('node-cron'); // Import cron scheduler
+const pool = require('./db'); // Database connection
 
+// Load env vars
 dotenv.config();
 
+// Routes Imports
+const authRoutes = require('./routes/authRoutes');
+const userRoutes = require('./routes/userRoutes');
+const adminRoutes = require('./routes/adminRoutes'); // If you have admin routes
+
 const app = express();
-const PORT = process.env.PORT || 5000;
 
+// --- MIDDLEWARE ---
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' })); // Increased limit for base64 image uploads
 
+// --- ROUTES ---
 app.use('/api/auth', authRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/admin', adminRoutes);
-app.use('/api/partner', partnerRoutes);
 
-app.get('/', (req, res) => res.send('FydBlock API is running...'));
+// Health Check
+app.get('/', (req, res) => {
+    res.send('FydBlock API is running...');
+});
 
-// --- CRON JOB: Runs Every Hour at Minute 0 ---
+// --- AUTOMATIC CLEANUP TASK (Cron Job) ---
+// Runs every hour at minute 0 (e.g., 1:00, 2:00, 3:00)
 cron.schedule('0 * * * *', async () => {
-    console.log(`[${new Date().toISOString()}] Running Portfolio Snapshot...`);
-    
+    console.log(`[${new Date().toISOString()}] 🧹 Running hourly portfolio cleanup...`);
     try {
-        // 1. Get all users who have connected an exchange
-        const users = await pool.query('SELECT DISTINCT user_id FROM user_exchanges');
+        // Delete records older than 24 hours
+        const result = await pool.query(
+            "DELETE FROM portfolio_snapshots WHERE recorded_at < NOW() - INTERVAL '24 hours'"
+        );
         
-        for (const user of users.rows) {
-            // 2. Calculate Value
-            const totalValue = await calculateUserTotalValue(user.user_id);
-            
-            // 3. Save to DB
-            if (totalValue > 0) {
-                await pool.query(
-                    'INSERT INTO portfolio_snapshots (user_id, total_value) VALUES ($1, $2)',
-                    [user.user_id, totalValue]
-                );
-                console.log(`Saved snapshot for User ${user.user_id}: $${totalValue}`);
-            }
+        if (result.rowCount > 0) {
+            console.log(`✅ Cleanup Success: Deleted ${result.rowCount} old records.`);
+        } else {
+            console.log(`ℹ️ Cleanup: No old records found.`);
         }
     } catch (err) {
-        console.error('Snapshot Job Error:', err.message);
+        console.error('❌ Cleanup Error:', err.message);
     }
 });
 
+// --- START SERVER ---
+const PORT = process.env.PORT || 5000;
+
 app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`⏰ Cron job scheduled: Deleting history older than 24h every hour.`);
 });
-
-
