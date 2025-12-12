@@ -9,6 +9,7 @@ const {
     createBot, 
     updateBot,          // "Configure" button
     deleteBot,          // "Delete" button
+    toggleBot,          // <--- NEW: Pause/Resume Bot
     getAvailableBots,   // "Create New Bot" modal
     authExchange, 
     authExchangeCallback,
@@ -19,7 +20,8 @@ const {
     getBacktests,   
     saveBacktest,
     runBacktest,        // Sends request TO Python Engine
-    executeTradeSignal  // Receives signal FROM Python Engine
+    executeTradeSignal, // Legacy signal handler
+    recordBotTrade      // <--- NEW: Receives trades FROM Python Engine
 } = require('../controllers/userController');
 
 const { protect } = require('../middleware/authMiddleware');
@@ -38,6 +40,7 @@ router.get('/bots', protect, getUserBots);              // Get User's Active Bot
 router.get('/available-bots', protect, getAvailableBots); // Get System/Admin Bots
 router.post('/bot', protect, createBot);                // Create New Bot
 router.put('/bot/:id', protect, updateBot);             // Update/Configure Bot
+router.put('/bot/:id/toggle', protect, toggleBot);      // <--- NEW: Toggle Route
 router.delete('/bot/:id', protect, deleteBot);          // Delete Bot
 
 // --- Dashboard & Portfolio ---
@@ -52,9 +55,11 @@ router.get('/backtests', protect, getBacktests);
 router.post('/backtest/save', protect, saveBacktest);
 router.post('/backtest/run', protect, runBacktest); // Calls Python Backtester
 
-// --- Python Engine Integration (Webhook) ---
-// This route is NOT protected by 'protect' because it's called by the Python script, not a user browser.
+// --- Python Engine Integration (Webhooks) ---
+// These routes are NOT protected by 'protect' (JWT) because they are called by the Python script.
 // Security is handled inside the controller using BOT_SECRET.
-router.post('/bot-signal', executeTradeSignal);
+
+router.post('/bot-signal', executeTradeSignal); // Legacy/Signal Bot
+router.post('/bot-trade', recordBotTrade);      // <--- NEW: Engine Sync Route
 
 module.exports = router;
