@@ -134,9 +134,9 @@ const createBot = async (req, res) => {
                 api_key: apiKey, api_secret: apiSecret, passphrase: passphrase,
                 strategy: configObj.strategy, mode: mode
             });
-            console.log(`✅ Engine Started Bot ${newBot.rows[0].bot_id} in ${mode} mode`);
+            console.log(`? Engine Started Bot ${newBot.rows[0].bot_id} in ${mode} mode`);
         } catch (engineError) {
-            console.error(`❌ Engine Start Failed: ${engineError.message}`);
+            console.error(`? Engine Start Failed: ${engineError.message}`);
             await pool.query("UPDATE bots SET status = 'error' WHERE bot_id = $1", [newBot.rows[0].bot_id]);
             return res.json({ ...newBot.rows[0], warning: "Bot saved but engine failed to start." });
         }
@@ -234,26 +234,98 @@ const getUserBots = async (req, res) => {
 const getDashboard = async (req, res) => {
     const { mode = 'live' } = req.query; 
     try {
-        const botsQuery = await pool.query("SELECT * FROM bots WHERE user_id = $1 AND bot_type != 'SKIPPED' ORDER BY created_at DESC", [req.user.id]);
+        // 1. Fetch User's Bots
+        const botsQuery = await pool.query(
+            "SELECT * FROM bots WHERE user_id = $1 AND bot_type != 'SKIPPED' ORDER BY created_at DESC", 
+            [req.user.id]
+        );
+        
         const filteredBots = botsQuery.rows.filter(bot => {
             const cfg = typeof bot.config === 'string' ? JSON.parse(bot.config || '{}') : bot.config;
             return (cfg.mode || 'live') === mode;
         });
-        let totalProfit = 0, totalInvested = 0;
+
+        // 2. Calculate Bot Stats
+        let totalBotProfit = 0;
+        let activeInvestment = 0;
+        
         filteredBots.forEach(bot => {
             let config = typeof bot.config === 'string' ? JSON.parse(bot.config) : bot.config;
-            totalProfit += parseFloat(config.total_profit || 0);
-            totalInvested += parseFloat(config.strategy?.investment || 0);
+            totalBotProfit += parseFloat(config.total_profit || 0);
+            activeInvestment += parseFloat(config.strategy?.investment || 0);
         });
+
+        // 3. Fetch Portfolio History (For Chart & Asset Value)
+        // We get the last 30 snapshots to draw the chart
+        const historyQuery = await pool.query(
+                `SELECT total_value, recorded_at 
+                 FROM portfolio_snapshots 
+                 WHERE user_id = $1 AND mode = $2  -- <--- ADDED FILTER
+                 ORDER BY recorded_at ASC 
+                 LIMIT 30`, 
+                [req.user.id, mode] // 'live' or 'paper' passed from frontend
+            );
+
+        const history = historyQuery.rows;
+        
+        // 4. Calculate "Assets Value" (Current Equity)
+        // If we have history, use the last record. If not, use Active Investment as a fallback.
+        const currentEquity = history.length > 0 
+            ? parseFloat(history[history.length - 1].total_value) 
+            : activeInvestment;
+
+        // 5. Calculate "30 Days Profit" (Change since first record)
+        let profit30d = 0;
+        let profitPercent = 0;
+        
+        if (history.length > 0) {
+            const startValue = parseFloat(history[0].total_value);
+            profit30d = currentEquity - startValue;
+            if (startValue > 0) {
+                profitPercent = ((profit30d / startValue) * 100).toFixed(2);
+            }
+        }
+
+        // 6. Format Chart Data for Frontend
+        // We map database timestamps to readable labels (e.g., "Nov 10")
+        const chartData = history.map(record => ({
+            date: new Date(record.recorded_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+            value: parseFloat(record.total_value)
+        }));
+
+        // --- FINAL RESPONSE ---
         res.json({ 
             stats: [
-                { title: "Total Profit", value: `$${totalProfit.toFixed(2)}`, percentage: totalInvested > 0 ? `+${((totalProfit/totalInvested)*100).toFixed(2)}%` : "0.00%", isPositive: true },
-                { title: "Active Investment", value: `$${totalInvested.toFixed(2)}`, percentage: "Active", isPositive: true },
-                { title: "Total Bots", value: filteredBots.length.toString(), percentage: "Running", isPositive: true },
+                // Card 1: Today's Profit (Bot Profit)
+                { 
+                    title: "Total Bot Profit", 
+                    value: `$${totalBotProfit.toFixed(2)}`, 
+                    percentage: activeInvestment > 0 ? `+${((totalBotProfit/activeInvestment)*100).toFixed(2)}%` : "0.00%", 
+                    isPositive: true 
+                },
+                // Card 2: 30 Days Profit (Portfolio Growth)
+                { 
+                    title: "30 Days PnL", 
+                    value: `$${profit30d.toFixed(2)}`, 
+                    percentage: `${profitPercent}%`, 
+                    isPositive: profit30d >= 0 
+                },
+                // Card 3: Assets Value (Total Equity) -> FIXED: Was showing bot count
+                { 
+                    title: "Assets Value", 
+                    value: `$${currentEquity.toLocaleString(undefined, { minimumFractionDigits: 2 })}`, 
+                    percentage: `${filteredBots.length} Bots`, // Moved count here
+                    isPositive: true 
+                },
             ], 
-            bots: filteredBots 
+            bots: filteredBots,
+            chartData: chartData // <--- Sending real chart data now
         });
-    } catch (err) { console.error(err.message); res.status(500).send('Server Error'); }
+
+    } catch (err) { 
+        console.error(err.message); 
+        res.status(500).send('Server Error'); 
+    }
 };
 
 // [FIXED] getPortfolio now FORCES API connection for Paper mode
@@ -433,14 +505,14 @@ const recordBotTrade = async (req, res) => {
             config.total_profit = currentProfit.toFixed(4);
             config.trade_count = (config.trade_count || 0) + 1;
             await pool.query("UPDATE bots SET config = $1 WHERE bot_id = $2", [JSON.stringify(config), bot_id]);
-            console.log(`💰 Trade Recorded: ${side} @ ${price}`);
+            console.log(`?? Trade Recorded: ${side} @ ${price}`);
         }
         res.json({ success: true });
     } catch (err) { console.error("Record Error:", err.message); res.status(500).json({ message: "Failed" }); }
 };
 
 const resumeActiveBots = async () => {
-    console.log("🔄 System Startup: Checking for active bots to resume...");
+    console.log("?? System Startup: Checking for active bots to resume...");
     try {
         const activeBotsQuery = await pool.query("SELECT * FROM bots WHERE status = 'active'");
         for (const bot of activeBotsQuery.rows) {
@@ -461,15 +533,46 @@ const resumeActiveBots = async () => {
                     pair: config.pair, api_key: apiKey, api_secret: apiSecret, passphrase: passphrase,
                     strategy: config.strategy, mode: mode
                 });
-                console.log(`✅ Resumed Bot ${bot.bot_id}`);
-            } catch (e) { console.error(`⚠️ Resume Failed Bot ${bot.bot_id}`); }
+                console.log(`? Resumed Bot ${bot.bot_id}`);
+            } catch (e) { console.error(`?? Resume Failed Bot ${bot.bot_id}`); }
         }
     } catch (err) { console.error("Auto-Resume Error:", err.message); }
 };
 
 const getAvailableBots = async (req, res) => { try { const r = await pool.query(`SELECT * FROM bots JOIN users ON bots.user_id = users.id WHERE users.role = 'admin'`); res.json(r.rows); } catch (e) { res.status(500).send('Error'); } };
 const executeTradeSignal = async (req, res) => { res.status(200).json({ message: "Legacy endpoint" }); };
-const runBacktest = async (req, res) => { res.json({ message: "Backtest started" }); };
+
+const runBacktest = async (req, res) => {
+    try {
+        console.log("🚀 Sending Backtest Request to Engine:", req.body);
+
+        // 1. Call the Python Trading Engine
+        // Ensure your Python engine has a POST /backtest route running on port 8000
+        const engineResponse = await axios.post(`${TRADING_ENGINE_URL}/backtest`, req.body);
+
+        // 2. Get Data from Engine
+        const { chartData, stats, history } = engineResponse.data;
+
+        // 3. Send Success Response to Frontend
+        res.json({
+            status: 'success',
+            chartData: chartData || [],
+            stats: stats || {},
+            history: history || []
+        });
+
+    } catch (err) {
+        console.error("❌ Backtest Failed:", err.message);
+        
+        // Handle Engine Offline or Errors
+        const errorMessage = err.response?.data?.message || "Trading Engine Offline or Error";
+        res.json({ 
+            status: 'error', 
+            message: errorMessage 
+        });
+    }
+};
+
 const getBacktests = async (req, res) => { res.json([]); };
 const saveBacktest = async (req, res) => { res.json({ message: "Saved" }); };
 
