@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  /* Container for the DCA Animation */
+  .dca-container {
+    width: 300px;
+    height: 150px;
+    background: #0f172a; /* Dark background */
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+    font-family: sans-serif;
+  }
+
+  /* The Graph Line */
+  .graph-line {
+    position: absolute;
+    bottom: 40px;
+    left: 0;
+    width: 100%;
+    height: 2px;
+    background: linear-gradient(90deg, 
+      rgba(16, 185, 129, 0) 0%, 
+      rgba(16, 185, 129, 1) 50%, 
+      rgba(16, 185, 129, 0) 100%);
+    animation: moveLine 3s linear infinite;
+  }
+
+  /* The "Buy" Markers */
+  .buy-marker {
+    position: absolute;
+    bottom: 36px;
+    width: 10px;
+    height: 10px;
+    background-color: #10b981; /* Green */
+    border-radius: 50%;
+    box-shadow: 0 0 8px #10b981;
+    opacity: 0;
+  }
+
+  /* Dollar Sign above markers */
+  .buy-label {
+    position: absolute;
+    bottom: 55px;
+    color: #fff;
+    font-size: 12px;
+    font-weight: bold;
+    opacity: 0;
+  }
+
+  /* Animation delays for the sequence of buys */
+  .marker-1 { left: 30%; animation: popIn 3s infinite; animation-delay: 0.5s; }
+  .label-1  { left: 29%; animation: floatUp 3s infinite; animation-delay: 0.5s; }
+
+  .marker-2 { left: 50%; animation: popIn 3s infinite; animation-delay: 1.5s; }
+  .label-2  { left: 49%; animation: floatUp 3s infinite; animation-delay: 1.5s; }
+
+  .marker-3 { left: 70%; animation: popIn 3s infinite; animation-delay: 2.5s; }
+  .label-3  { left: 69%; animation: floatUp 3s infinite; animation-delay: 2.5s; }
+
+  /* Keyframes */
+  @keyframes moveLine {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+  }
+
+  @keyframes popIn {
+    0% { transform: scale(0); opacity: 0; }
+    20% { transform: scale(1.2); opacity: 1; }
+    40% { transform: scale(1); opacity: 1; }
+    90% { transform: scale(1); opacity: 0; }
+    100% { transform: scale(0); opacity: 0; }
+  }
+
+  @keyframes floatUp {
+    0% { transform: translateY(10px); opacity: 0; }
+    20% { transform: translateY(0); opacity: 1; }
+    80% { transform: translateY(-10px); opacity: 0; }
+    100% { opacity: 0; }
+  }
+</style>
+</head>
+<body>
+
+<div class="dca-container">
+  <div class="graph-line"></div>
+  
+  <div class="buy-marker marker-1"></div>
+  <div class="buy-label label-1">$</div>
+  
+  <div class="buy-marker marker-2"></div>
+  <div class="buy-label label-2">$</div>
+  
+  <div class="buy-marker marker-3"></div>
+  <div class="buy-label label-3">$</div>
+</div>
+
+</body>
+</html>

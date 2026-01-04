@@ -1,0 +1,806 @@
+// backend/controllers/userController.js
+const pool = require('../db');
+const axios = require('axios');
+const ccxt = require('ccxt');
+const { encrypt, decrypt } = require('../utils/encryption');
+
+// --- GLOBAL VARIABLES ---
+const TRADING_ENGINE_URL = process.env.TRADING_ENGINE_URL || 'http://localhost:8000';
+const BOT_SECRET = process.env.BOT_SECRET || 'my_super_secure_bot_secret_123';
+
+// ============================================================
+// 1. USER & PROFILE
+// ============================================================
+
+const getMe = async (req, res) => {
+    try {
+        const userQuery = await pool.query('SELECT id, email, full_name, country, phone_number, role FROM users WHERE id = $1', [req.user.id]);
+        if (userQuery.rows.length === 0) return res.status(404).json({ message: 'User not found' });
+
+        const user = userQuery.rows[0];
+        const botQuery = await pool.query("SELECT * FROM bots WHERE user_id = $1 AND bot_type != 'SKIPPED'", [req.user.id]);
+
+        // Check for keys
+        const liveExQuery = await pool.query("SELECT 1 FROM user_exchanges WHERE user_id = $1 AND exchange_name NOT LIKE '%_paper' LIMIT 1", [req.user.id]);
+        const paperExQuery = await pool.query("SELECT 1 FROM user_exchanges WHERE user_id = $1 AND exchange_name LIKE '%_paper' LIMIT 1", [req.user.id]);
+
+        res.json({
+            user: user,
+            profileComplete: !!user.full_name,
+            botCreated: botQuery.rows.length > 0,
+            hasExchange: (liveExQuery.rows.length > 0 || paperExQuery.rows.length > 0),
+            hasLiveExchange: liveExQuery.rows.length > 0,
+            hasPaperExchange: paperExQuery.rows.length > 0
+        });
+    } catch (err) { console.error(err.message); res.status(500).send('Server Error'); }
+};
+
+const updateProfile = async (req, res) => {
+    const { full_name, country, phone } = req.body;
+    try {
+        const updatedUser = await pool.query('UPDATE users SET full_name = $1, country = $2, phone_number = $3 WHERE id = $4 RETURNING *', [full_name, country, phone, req.user.id]);
+        res.json(updatedUser.rows[0]);
+    } catch (err) { console.error(err.message); res.status(500).send('Server Error'); }
+};
+
+// 2. EXCHANGE MANAGEMENT
+// ============================================================
+
+const getSupportedExchanges = (req, res) => {
+    res.json([
+        { id: 'binance', name: 'Binance', required_fields: ['api_key', 'api_secret'] },
+        { id: 'okx', name: 'OKX', required_fields: ['api_key', 'api_secret', 'passphrase'] },
+        { id: 'kucoin', name: 'KuCoin', required_fields: ['api_key', 'api_secret', 'passphrase'] },
+    ]);
+};
+
+const addExchange = async (req, res) => {
+    const { exchange_name, api_key, api_secret, passphrase } = req.body;
+    try {
+        const exchangeId = exchange_name.replace('_paper', '').toLowerCase();
+
+        if (ccxt[exchangeId]) {
+            const config = {
+                apiKey: api_key,
+                secret: api_secret,
+                password: passphrase,
+                enableRateLimit: true
+            };
+
+            const ex = new ccxt[exchangeId](config);
+
+            // Test connection immediately
+            if (exchange_name.includes('_paper')) {
+                if (ex.has['sandbox']) {
+                    ex.setSandboxMode(true);
+                } else if (exchangeId === 'okx') {
+                    // Manual OKX Sandbox
+                    ex.options['sandboxMode'] = true;
+                    ex.headers = ex.headers || {};
+                    ex.headers['x-simulated-trading'] = '1';
+                } else {
+                    return res.status(400).json({ message: 'This exchange does not support Paper Trading (Sandbox).' });
+                }
+            }
+
+            // Validate keys by fetching balance
+            try {
+                await ex.fetchBalance();
+            } catch (authErr) {
+                console.error(`Exchange Auth Error (${exchangeId}):`, authErr.message);
+                return res.status(400).json({ message: `Authentication failed: ${authErr.message}` });
+            }
+
+        } else {
+            return res.status(400).json({ message: 'Invalid exchange' });
+        }
+
+        const encryptedKey = encrypt(api_key);
+        const encryptedSecret = encrypt(api_secret);
+        const encryptedPassphrase = passphrase ? encrypt(passphrase) : null;
+
+        // Check if already exists
+        const existing = await pool.query(
+            'SELECT * FROM user_exchanges WHERE user_id = $1 AND exchange_name = $2',
+            [req.user.id, exchange_name]
+        );
+
+        if (existing.rows.length > 0) {
+            await pool.query(
+                'UPDATE user_exchanges SET api_key = $1, api_secret = $2, passphrase = $3 WHERE user_id = $4 AND exchange_name = $5',
+                [encryptedKey, encryptedSecret, encryptedPassphrase, req.user.id, exchange_name]
+            );
+            return res.json({ message: 'Exchange updated successfully' });
+        }
+
+        const newExchange = await pool.query(
+            'INSERT INTO user_exchanges (user_id, exchange_name, api_key, api_secret, passphrase, connection_type) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+            [req.user.id, exchange_name, encryptedKey, encryptedSecret, encryptedPassphrase, 'manual']
+        );
+
+        res.json(newExchange.rows[0]);
+    } catch (err) { console.error(err.message); res.status(500).send('Server Error'); }
+};
+
+const authExchange = (req, res) => { res.status(501).json({ message: "OAuth not implemented" }); };
+const authExchangeCallback = async (req, res) => { res.redirect(`${process.env.FRONTEND_URL}/dashboard`); };
+
+// ============================================================
+// 3. BOT MANAGEMENT
+// ============================================================
+
+const createBot = async (req, res) => {
+    const { bot_name, quote_currency, bot_type, plan, billing_cycle, description, config, icon, status, mode = 'live' } = req.body;
+
+    try {
+        if (plan) {
+            await pool.query('INSERT INTO subscriptions (user_id, plan_type, billing_cycle) VALUES ($1, $2, $3)', [req.user.id, plan, billing_cycle]);
+        }
+
+        // Find correct keys
+        let exchangeQuery = 'SELECT * FROM user_exchanges WHERE user_id = $1 ';
+        exchangeQuery += mode === 'paper' ? "AND exchange_name LIKE '%_paper' " : "AND exchange_name NOT LIKE '%_paper' ";
+        exchangeQuery += 'ORDER BY created_at DESC LIMIT 1';
+
+        const exchangeRes = await pool.query(exchangeQuery, [req.user.id]);
+
+        // Strict check: Must have keys for EITHER mode now
+        if (exchangeRes.rows.length === 0) {
+            return res.status(400).json({ message: `No ${mode} exchange connected. Please connect keys first.` });
+        }
+
+        const exchangeData = exchangeRes.rows[0];
+        const exchangeId = exchangeData.exchange_id;
+
+        console.log("createBot Payload:", JSON.stringify(req.body, null, 2)); // DEBUG LOG
+        let configObj = typeof config === 'object' ? config : JSON.parse(config || '{}');
+        console.log("Parsed Config:", JSON.stringify(configObj, null, 2)); // DEBUG LOG
+
+        configObj.mode = mode;
+        configObj.total_profit = 0;
+        configObj.trade_count = 0;
+
+        // Extract Strategy early to check for investment there
+        const strat = configObj.strategy || {};
+
+        // ? CORRECT LOCATION: Inside the function calls
+        // Fallback Sequence: config.investment -> req.body.investment -> strategy.investment
+        const investmentAmount = parseFloat(configObj.investment || req.body.investment || strat.investment || 0);
+        console.log("Resolved Investment Amount:", investmentAmount); // DEBUG LOG
+
+        const configStr = JSON.stringify(configObj);
+
+        const newBot = await pool.query(
+            `INSERT INTO bots (user_id, exchange_connection_id, bot_name, quote_currency, bot_type, status, description, config, icon_url) 
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+            [req.user.id, exchangeId, bot_name || 'Grid Bot', quote_currency || 'USDT', bot_type, 'active', description, configStr, icon]
+        );
+
+        // Start Engine
+        try {
+            const apiKey = decrypt(exchangeData.api_key);
+            const apiSecret = decrypt(exchangeData.api_secret);
+            const passphrase = exchangeData.passphrase ? decrypt(exchangeData.passphrase) : null;
+            const realExchangeName = exchangeData.exchange_name.replace('_paper', '').toLowerCase();
+
+            // Map Backend Logic to GridBot Pydantic Schema
+            const isTestnet = mode === 'paper';
+
+            // Extract Grid Params
+            let strategy = configObj.strategy || {};
+            // If strategy came as a string inside configObj
+            if (typeof strategy === 'string') {
+                try { strategy = JSON.parse(strategy); } catch (e) { }
+            }
+
+            await axios.post(`${TRADING_ENGINE_URL}/start`, {
+                bot_id: newBot.rows[0].bot_id,
+                user_id: req.user.id,
+                exchange: realExchangeName,
+                pair: configObj.pair || `${quote_currency}/USDT`,
+                api_key: apiKey,
+                api_secret: apiSecret,
+                passphrase: passphrase,
+                mode: isTestnet ? 'paper' : 'live',
+                investment: investmentAmount,
+                strategy: {
+                    upper_price: parseFloat(strategy.upper_limit || strategy.upper_price || 0),
+                    lower_price: parseFloat(strategy.lower_limit || strategy.lower_price || 0),
+                    grids: parseInt(strategy.grid_count || strategy.grids || 10),
+                    spacing: (strategy.grid_type || "ARITHMETIC").toLowerCase() === 'geometric' ? 'geometric' : 'arithmetic'
+                }
+            });
+            console.log(`? Engine Started Bot ${newBot.rows[0].bot_id} in ${mode} mode`);
+        } catch (engineError) {
+            console.error(`? Engine Start Failed Details:`, engineError.response ? engineError.response.data : engineError.message);
+            console.error(`? Engine Start Stack:`, engineError.stack); // ADDED FOR DEBUGGING
+            await pool.query("UPDATE bots SET status = 'error' WHERE bot_id = $1", [newBot.rows[0].bot_id]);
+            return res.json({ ...newBot.rows[0], warning: "Bot saved but engine failed to start." });
+        }
+
+        res.json(newBot.rows[0]);
+    } catch (err) { console.error(err.message); res.status(500).send('Server Error'); }
+};
+
+const toggleBot = async (req, res) => {
+    const { id } = req.params;
+    try {
+        const botRes = await pool.query('SELECT * FROM bots WHERE bot_id = $1 AND user_id = $2', [id, req.user.id]);
+        if (botRes.rows.length === 0) return res.status(404).json({ message: "Bot not found" });
+
+        const bot = botRes.rows[0];
+        const newStatus = bot.status === 'active' ? 'paused' : 'active';
+        let config = typeof bot.config === 'string' ? JSON.parse(bot.config) : bot.config;
+
+        await pool.query("UPDATE bots SET status = $1 WHERE bot_id = $2", [newStatus, id]);
+
+        if (newStatus === 'paused') {
+            try { await axios.post(`${TRADING_ENGINE_URL}/stop/${id}`, {}); } catch (e) { console.error("Engine Stop Error:", e.message); }
+        } else {
+            // Resume
+            const exRes = await pool.query('SELECT * FROM user_exchanges WHERE exchange_id = $1', [bot.exchange_connection_id]);
+            if (exRes.rows.length > 0) {
+                const exData = exRes.rows[0];
+                const apiKey = decrypt(exData.api_key);
+                const apiSecret = decrypt(exData.api_secret);
+                const passphrase = exData.passphrase ? decrypt(exData.passphrase) : null;
+                const realExName = exData.exchange_name.replace('_paper', '').toLowerCase();
+
+                try {
+                    const isTestnet = config.mode === 'paper' || exData.exchange_name.includes('_paper');
+                    const strategy = config.strategy || {};
+
+                    await axios.post(`${TRADING_ENGINE_URL}/start`, {
+                        bot_id: parseInt(id),
+                        user_id: req.user.id,
+                        exchange: realExName,
+                        pair: config.pair,
+                        api_key: apiKey,
+                        api_secret: apiSecret,
+                        passphrase: passphrase,
+                        mode: isTestnet ? 'paper' : 'live',
+                        investment: parseFloat(strategy.investment || 0),
+                        strategy: {
+                            upper_price: parseFloat(strategy.upper_limit || strategy.upper_price || 0),
+                            lower_price: parseFloat(strategy.lower_limit || strategy.lower_price || 0),
+                            grids: parseInt(strategy.grid_count || strategy.grids || 10),
+                            spacing: (strategy.grid_type || "ARITHMETIC").toLowerCase() === 'geometric' ? 'geometric' : 'arithmetic'
+                        }
+                    });
+                } catch (e) { console.error("Engine Resume Error:", e.message); }
+            }
+        }
+        res.json({ message: `Bot ${newStatus}`, status: newStatus });
+    } catch (err) { console.error(err.message); res.status(500).send('Server Error'); }
+};
+
+const updateBot = async (req, res) => {
+    const { id } = req.params;
+    const { bot_name, bot_type, status, description, config, icon } = req.body;
+    try {
+        const configStr = typeof config === 'object' ? JSON.stringify(config) : config;
+        const updatedBot = await pool.query(
+            `UPDATE bots SET bot_name = $1, bot_type = $2, status = $3, description = $4, config = $5, icon_url = $6 WHERE bot_id = $7 AND user_id = $8 RETURNING *`,
+            [bot_name, bot_type, status, description, configStr, icon, id, req.user.id]
+        );
+        if (updatedBot.rows.length === 0) return res.status(404).json({ message: 'Bot not found' });
+        res.json(updatedBot.rows[0]);
+    } catch (err) { console.error(err.message); res.status(500).send('Server Error'); }
+};
+
+const deleteBot = async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        // 1. Fetch Keys to support Offline Liquidation
+        let credsPayload = null;
+        try {
+            const botQuery = await pool.query('SELECT * FROM bots WHERE bot_id = $1 AND user_id = $2', [id, req.user.id]);
+            if (botQuery.rows.length > 0) {
+                const bot = botQuery.rows[0];
+                const config = typeof bot.config === 'string' ? JSON.parse(bot.config || '{}') : bot.config;
+                const strategy = config.strategy || {};
+
+                // Get Exchange Keys
+                // Get Exchange Keys - FIXED Column Name
+                const exRes = await pool.query('SELECT * FROM user_exchanges WHERE exchange_id = $1', [bot.exchange_connection_id]);
+                if (exRes.rows.length > 0) {
+                    const exData = exRes.rows[0];
+                    credsPayload = {
+                        api_key: decrypt(exData.api_key),
+                        api_secret: decrypt(exData.api_secret),
+                        passphrase: exData.passphrase ? decrypt(exData.passphrase) : null,
+                        exchange: exData.exchange_name.replace('_paper', '').toLowerCase(),
+                        pair: config.pair,
+                        mode: config.mode || 'live'
+                    };
+                }
+            }
+        } catch (e) {
+            console.error("Failed to fetch credentials for liquidation:", e.message);
+        }
+
+        try {
+            const deleteConfig = {
+                params: { liquidate: true },
+                data: credsPayload || {}
+            };
+
+            await axios.delete(`${TRADING_ENGINE_URL}/bot/${id}`, deleteConfig);
+        } catch (e) {
+            console.error("Engine Delete/Stop Error:", e.response ? e.response.data : e.message);
+        }
+
+        const result = await pool.query('DELETE FROM bots WHERE bot_id = $1 AND user_id = $2 RETURNING *', [id, req.user.id]);
+        if (result.rows.length === 0) return res.status(404).json({ message: 'Bot not found' });
+        res.json({ message: 'Bot removed' });
+    } catch (err) { console.error(err.message); res.status(500).send('Server Error'); }
+};
+
+// ============================================================
+// 4. PORTFOLIO & DASHBOARD (STRICT API FETCH)
+// ============================================================
+
+const getUserBots = async (req, res) => {
+    const { mode = 'live' } = req.query;
+    try {
+        const botsQuery = await pool.query("SELECT * FROM bots WHERE user_id = $1 AND status != 'archived' AND bot_type != 'SKIPPED' ORDER BY created_at DESC", [req.user.id]);
+        const filteredBots = botsQuery.rows.filter(bot => {
+            const cfg = typeof bot.config === 'string' ? JSON.parse(bot.config || '{}') : bot.config;
+            return (cfg.mode || 'live') === mode;
+        });
+        const enrichedBots = filteredBots.map(bot => {
+            let config = typeof bot.config === 'string' ? JSON.parse(bot.config || '{}') : bot.config;
+            return {
+                ...bot,
+                invested_capital: parseFloat(config.strategy?.investment || 0).toFixed(2),
+                total_profit: config.total_profit || (0).toFixed(2),
+                is_running: bot.status === 'running' || bot.status === 'active'
+            };
+        });
+        res.json(enrichedBots);
+    } catch (err) { console.error(err.message); res.status(500).send('Server Error'); }
+};
+
+const getDashboard = async (req, res) => {
+    const { mode = 'live' } = req.query;
+    try {
+        // 1. Fetch User's Bots
+        const botsQuery = await pool.query(
+            "SELECT * FROM bots WHERE user_id = $1 AND bot_type != 'SKIPPED' ORDER BY created_at DESC",
+            [req.user.id]
+        );
+
+        const filteredBots = botsQuery.rows.filter(bot => {
+            const cfg = typeof bot.config === 'string' ? JSON.parse(bot.config || '{}') : bot.config;
+            return (cfg.mode || 'live') === mode;
+        });
+
+        // 2. Calculate Bot Stats
+        let totalBotProfit = 0;
+        let activeInvestment = 0;
+
+        filteredBots.forEach(bot => {
+            let config = typeof bot.config === 'string' ? JSON.parse(bot.config) : bot.config;
+            totalBotProfit += parseFloat(config.total_profit || 0);
+            activeInvestment += parseFloat(config.strategy?.investment || 0);
+        });
+
+        // 3. Fetch Portfolio History (For Chart & Asset Value)
+        // We get the last 30 snapshots to draw the chart
+        const tableName = mode === 'live' ? 'portfolio_snapshots_live' : 'portfolio_snapshots_paper';
+        const historyQuery = await pool.query(
+            `SELECT total_value, recorded_at 
+                 FROM ${tableName} 
+                 WHERE user_id = $1 
+                 ORDER BY recorded_at ASC 
+                 LIMIT 30`,
+            [req.user.id] // 'live' or 'paper' passed from frontend
+        );
+
+        const history = historyQuery.rows;
+
+        // 4. Calculate "Assets Value" (Current Equity)
+        // If we have history, use the last record. If not, use Active Investment as a fallback.
+        const currentEquity = history.length > 0
+            ? parseFloat(history[history.length - 1].total_value)
+            : activeInvestment;
+
+        // 5. Calculate "30 Days Profit" (Change since first record)
+        let profit30d = 0;
+        let profitPercent = 0;
+
+        if (history.length > 0) {
+            const startValue = parseFloat(history[0].total_value);
+            profit30d = currentEquity - startValue;
+            if (startValue > 0) {
+                profitPercent = ((profit30d / startValue) * 100).toFixed(2);
+            }
+        }
+
+        // 6. Format Chart Data for Frontend
+        // We map database timestamps to readable labels (e.g., "Nov 10")
+        const chartData = history.map(record => ({
+            date: new Date(record.recorded_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+            value: parseFloat(record.total_value)
+        }));
+
+        // --- FINAL RESPONSE ---
+        res.json({
+            stats: [
+                // Card 1: Today's Profit (Bot Profit)
+                {
+                    title: "Total Bot Profit",
+                    value: `$${totalBotProfit.toFixed(2)}`,
+                    percentage: activeInvestment > 0 ? `+${((totalBotProfit / activeInvestment) * 100).toFixed(2)}%` : "0.00%",
+                    isPositive: true
+                },
+                // Card 2: 30 Days Profit (Portfolio Growth)
+                {
+                    title: "30 Days PnL",
+                    value: `$${profit30d.toFixed(2)}`,
+                    percentage: `${profitPercent}%`,
+                    isPositive: profit30d >= 0
+                },
+                // Card 3: Assets Value (Total Equity) -> FIXED: Was showing bot count
+                {
+                    title: "Assets Value",
+                    value: `$${currentEquity.toLocaleString(undefined, { minimumFractionDigits: 2 })}`,
+                    percentage: `${filteredBots.length} Bots`, // Moved count here
+                    isPositive: true
+                },
+            ],
+            bots: filteredBots,
+            chartData: chartData // <--- Sending real chart data now
+        });
+
+    } catch (err) {
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    }
+};
+
+// [FIXED] getPortfolio now FORCES API connection for Paper mode
+const getPortfolio = async (req, res) => {
+    const { mode = 'live' } = req.query;
+
+    try {
+        // 1. Get Keys
+        let query = 'SELECT * FROM user_exchanges WHERE user_id = $1 ';
+        query += mode === 'paper' ? "AND exchange_name LIKE '%_paper' " : "AND exchange_name NOT LIKE '%_paper' ";
+        query += 'ORDER BY created_at DESC LIMIT 1';
+
+        const keysQuery = await pool.query(query, [req.user.id]);
+
+        // FORCE ERROR IF NO KEYS (No simulated data allowed)
+        if (keysQuery.rows.length === 0) {
+            return res.json({
+                totalValue: 0,
+                changePercent: 0,
+                assets: [],
+                history: [],
+                error: `No ${mode} API connected. Please connect keys.`
+            });
+        }
+
+        const exchangeData = keysQuery.rows[0];
+        const exchangeId = exchangeData.exchange_name.replace('_paper', '').toLowerCase();
+
+        let apiKey, apiSecret, password;
+        try {
+            apiKey = decrypt(exchangeData.api_key);
+            apiSecret = decrypt(exchangeData.api_secret);
+            password = exchangeData.passphrase ? decrypt(exchangeData.passphrase) : undefined;
+        } catch (e) {
+            return res.status(500).json({ message: "Key Decryption Error" });
+        }
+
+        if (!ccxt[exchangeId]) return res.status(400).json({ message: 'Exchange not supported' });
+
+        const exchange = new ccxt[exchangeId]({ apiKey, secret: apiSecret, password, enableRateLimit: true });
+
+        // --- FORCE SANDBOX FOR PAPER ---
+        if (mode === 'paper') {
+            if (exchange.has['sandbox']) {
+                exchange.setSandboxMode(true); // <--- This connects to OKX Demo
+            } else {
+                return res.json({ totalValue: 0, assets: [], error: "This exchange does not support Testnet via API." });
+            }
+        }
+
+        // 2. Fetch Real Balance
+        let balanceData = {};
+        try {
+            balanceData = await exchange.fetchBalance();
+        } catch (e) {
+            console.error(`CCXT Balance Error (${mode}):`, e.message);
+            return res.json({ totalValue: 0, assets: [], error: "Failed to fetch balance from exchange." });
+        }
+
+        const assetsList = [];
+        const balances = balanceData.total || {};
+
+        Object.entries(balances).forEach(([symbol, amount]) => {
+            if (amount > 0) assetsList.push({ symbol, balance: amount });
+        });
+
+        // 3. Fetch Prices
+        let tickers = {};
+        try {
+            const symbolsToFetch = assetsList
+                .filter(a => !['USDT', 'USDC', 'BUSD', 'DAI'].includes(a.symbol.toUpperCase()))
+                .map(a => `${a.symbol}/USDT`);
+
+            if (symbolsToFetch.length > 0) {
+                tickers = await exchange.fetchTickers(symbolsToFetch);
+            }
+        } catch (e) { console.error("Ticker Error:", e.message); }
+
+        let totalValue = 0;
+        let totalPreviousValue = 0;
+
+        const enrichedAssets = assetsList.map(asset => {
+            let price = 0;
+            let change24h = 0;
+            const sym = asset.symbol.toUpperCase();
+
+            if (['USDT', 'USDC', 'DAI', 'BUSD'].includes(sym)) {
+                price = 1.0;
+            } else {
+                const pair = `${asset.symbol}/USDT`;
+                if (tickers[pair]) {
+                    price = tickers[pair].last;
+                    change24h = tickers[pair].percentage;
+                }
+            }
+
+            const val = asset.balance * price;
+            totalValue += val;
+
+            if (change24h !== undefined) {
+                const prevPrice = price / (1 + (change24h / 100));
+                totalPreviousValue += (asset.balance * prevPrice);
+            } else {
+                totalPreviousValue += val;
+            }
+
+            return {
+                symbol: asset.symbol,
+                balance: asset.balance,
+                price,
+                value: val,
+                change: change24h ? parseFloat(change24h.toFixed(2)) : 0
+            };
+        });
+
+        const changePercent = totalPreviousValue > 0 ? ((totalValue - totalPreviousValue) / totalPreviousValue) * 100 : 0;
+
+        // 4. Get History (Real Only)
+        let historyData = [];
+        try {
+            const tableName = mode === 'live' ? 'portfolio_snapshots_live' : 'portfolio_snapshots_paper';
+            const historyQuery = await pool.query(
+                `SELECT total_value FROM ${tableName} 
+                 WHERE user_id = $1 
+                 ORDER BY recorded_at DESC 
+                 LIMIT 24`,
+                [req.user.id]
+            );
+            if (historyQuery.rows.length > 0) {
+                historyData = historyQuery.rows.map(r => parseFloat(r.total_value)).reverse();
+            }
+        } catch (e) { }
+
+        if (totalValue > 0) historyData.push(totalValue);
+        if (historyData.length < 2) historyData = [totalValue, totalValue];
+
+        res.json({
+            totalValue,
+            changePercent: parseFloat(changePercent.toFixed(2)),
+            assets: enrichedAssets.sort((a, b) => b.value - a.value),
+            history: historyData,
+            isSimulated: false, // Explicitly tell frontend this is REAL data
+            mode: mode
+        });
+
+    } catch (err) {
+        console.error("Portfolio Error:", err);
+        res.status(500).send('Server Error');
+    }
+};
+
+// ============================================================
+// 5. UTILS & HELPERS
+// ============================================================
+
+const getMarketData = async (req, res) => {
+    const { exchange: exchangeId, symbol } = req.query;
+    if (!exchangeId || !symbol) return res.status(400).json({ message: 'Missing parameters' });
+    try {
+        if (!ccxt[exchangeId.toLowerCase()]) return res.status(400).json({ message: 'Exchange not supported' });
+        const exchange = new ccxt[exchangeId.toLowerCase()]();
+        const orderBook = await exchange.fetchOrderBook(symbol, 10);
+        res.json({ symbol, bids: orderBook.bids, asks: orderBook.asks, timestamp: Date.now() });
+    } catch (err) { res.status(500).json({ message: 'Failed to fetch market data' }); }
+};
+
+const getMarketTickers = async (req, res) => {
+    const { exchange: exchangeId, symbols } = req.query;
+    if (!exchangeId || !symbols) return res.status(400).json({ message: 'Missing parameters' });
+    try {
+        const parsedExId = exchangeId.toLowerCase();
+        if (!ccxt[parsedExId]) return res.status(400).json({ message: 'Exchange not supported' });
+
+        const exchange = new ccxt[parsedExId]({ enableRateLimit: true });
+        // Some exchanges require loadMarkets before fetchTickers
+        await exchange.loadMarkets();
+
+        const symbolArray = symbols.split(',').map(s => s.trim().toUpperCase());
+        // Fetch tickers (ccxt usually supports passing list of symbols)
+        const tickers = await exchange.fetchTickers(symbolArray);
+
+        const result = [];
+        symbolArray.forEach(sym => {
+            const data = tickers[sym];
+            if (data) {
+                result.push({
+                    symbol: sym,
+                    lastPrice: data.last,
+                    percentage: data.percentage // 24h change %
+                });
+            }
+        });
+
+        res.json(result);
+    } catch (err) {
+        console.error("Ticker fetch error:", err.message);
+        res.status(500).json({ message: 'Failed to fetch tickers' });
+    }
+};
+
+const getMarketCandles = async (req, res) => {
+    const { exchange: exchangeId, symbol, timeframe = '1h' } = req.query;
+    if (!exchangeId || !symbol) return res.status(400).json({ message: 'Missing parameters' });
+    try {
+        const parsedExId = exchangeId.toLowerCase();
+        if (!ccxt[parsedExId]) return res.status(400).json({ message: 'Exchange not supported' });
+
+        const exchange = new ccxt[parsedExId]({ enableRateLimit: true });
+
+        // Ensure markets are loaded
+        if (!exchange.markets) await exchange.loadMarkets();
+
+        // Map UI timeframe to CCXT if needed, though 1h/4h/1d/1w is standard
+        const candles = await exchange.fetchOHLCV(symbol, timeframe, undefined, 50); // Get last 50 candles
+
+        // Format for Recharts: { time: '12:00', price: 50000, high: ..., low: ... }
+        const formattedData = candles.map(candle => {
+            const [timestamp, open, high, low, close, volume] = candle;
+            return {
+                time: new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                dateFull: new Date(timestamp).toLocaleDateString(),
+                price: close,
+                // Add more if needed for sophisticated charts
+            };
+        });
+
+        res.json(formattedData);
+    } catch (err) {
+        console.error("Candle fetch error:", err.message);
+        res.status(500).json({ message: 'Failed to fetch candles' });
+    }
+};
+
+const recordBotTrade = async (req, res) => {
+    const { bot_id, side, price, amount, profit } = req.body;
+    try {
+        const botRes = await pool.query("SELECT config FROM bots WHERE bot_id = $1", [bot_id]);
+        if (botRes.rows.length > 0) {
+            let config = typeof botRes.rows[0].config === 'string' ? JSON.parse(botRes.rows[0].config) : botRes.rows[0].config;
+            let currentProfit = parseFloat(config.total_profit || 0);
+
+            if (profit !== undefined && profit !== null) {
+                currentProfit += parseFloat(profit);
+            }
+            else if (side === 'sell') {
+                const tradeValue = price * amount;
+                currentProfit += tradeValue * 0.005; // Default estimation
+            }
+            config.total_profit = currentProfit.toFixed(4);
+            config.trade_count = (config.trade_count || 0) + 1;
+            await pool.query("UPDATE bots SET config = $1 WHERE bot_id = $2", [JSON.stringify(config), bot_id]);
+            console.log(`? Trade Recorded: ${side} @ ${price}`);
+        }
+        res.json({ success: true });
+    } catch (err) { console.error("Record Error:", err.message); res.status(500).json({ message: "Failed" }); }
+};
+
+const resumeActiveBots = async () => {
+    console.log("?? System Startup: Checking for active bots to resume...");
+    try {
+        const activeBotsQuery = await pool.query("SELECT * FROM bots WHERE status = 'active'");
+        for (const bot of activeBotsQuery.rows) {
+            const exRes = await pool.query('SELECT * FROM user_exchanges WHERE exchange_id = $1', [bot.exchange_connection_id]);
+            if (exRes.rows.length === 0) continue;
+
+            const exData = exRes.rows[0];
+            const apiKey = decrypt(exData.api_key);
+            const apiSecret = decrypt(exData.api_secret);
+            const passphrase = exData.passphrase ? decrypt(exData.passphrase) : null;
+            const realExName = exData.exchange_name.replace('_paper', '').toLowerCase();
+            let config = typeof bot.config === 'string' ? JSON.parse(bot.config) : bot.config;
+
+            try {
+                const mode = config.mode || (exData.exchange_name.includes('_paper') ? 'paper' : 'live');
+                const isTestnet = mode === 'paper';
+                const strategy = config.strategy || {};
+
+                await axios.post(`${TRADING_ENGINE_URL}/start`, {
+                    bot_id: bot.bot_id,
+                    user_id: bot.user_id,
+                    exchange: realExName,
+                    pair: config.pair,
+                    api_key: apiKey,
+                    api_secret: apiSecret,
+                    passphrase: passphrase,
+                    mode: isTestnet ? 'paper' : 'live',
+                    investment: parseFloat(strategy.investment || 0),
+                    strategy: {
+                        upper_price: parseFloat(strategy.upper_limit || strategy.upper_price || 0),
+                        lower_price: parseFloat(strategy.lower_limit || strategy.lower_price || 0),
+                        grids: parseInt(strategy.grid_count || strategy.grids || 10),
+                        spacing: (strategy.grid_type || "ARITHMETIC").toLowerCase() === 'geometric' ? 'geometric' : 'arithmetic'
+                    }
+                });
+                console.log(`? Resumed Bot ${bot.bot_id}`);
+            } catch (e) { console.error(`? Resume Failed Bot ${bot.bot_id}`); }
+        }
+    } catch (err) { console.error("Auto-Resume Error:", err.message); }
+};
+
+const getAvailableBots = async (req, res) => { try { const r = await pool.query(`SELECT * FROM bots JOIN users ON bots.user_id = users.id WHERE users.role = 'admin'`); res.json(r.rows); } catch (e) { res.status(500).send('Error'); } };
+const executeTradeSignal = async (req, res) => { res.status(200).json({ message: "Legacy endpoint" }); };
+
+const runBacktest = async (req, res) => {
+    try {
+        console.log("?? Sending Backtest Request to Engine:", req.body);
+
+        // 1. Call the Python Trading Engine
+        // Ensure your Python engine has a POST /backtest route running on port 8000
+        const engineResponse = await axios.post(`${TRADING_ENGINE_URL}/backtest`, req.body);
+
+        // 2. Get Data from Engine
+        const { chartData, stats, history } = engineResponse.data;
+
+        // 3. Send Success Response to Frontend
+        res.json({
+            status: 'success',
+            chartData: chartData || [],
+            stats: stats || {},
+            history: history || []
+        });
+
+        // 4. (Optional) Save Backtest to DB if needed
+        // await pool.query('INSERT INTO backtests ...');
+
+    } catch (err) {
+        console.error("? Backtest Failed:", err.message);
+
+        // Handle Engine Offline or Errors
+        const errorMessage = err.response?.data?.message || "Trading Engine Offline or Error";
+        res.json({
+            status: 'error',
+            message: errorMessage
+        });
+    }
+};
+
+const getBacktests = async (req, res) => { res.json([]); };
+const saveBacktest = async (req, res) => { res.json({ message: "Saved" }); };
+
+module.exports = {
+    getMe, updateProfile, addExchange, createBot, toggleBot, updateBot, deleteBot, getAvailableBots,
+    authExchange, authExchangeCallback, getDashboard, getPortfolio,
+    getUserBots, getMarketData, getMarketTickers, getMarketCandles, executeTradeSignal, recordBotTrade, runBacktest, getBacktests, saveBacktest, resumeActiveBots,
+    getSupportedExchanges
+};
