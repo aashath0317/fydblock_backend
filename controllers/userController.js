@@ -95,6 +95,31 @@ const addExchange = async (req, res) => {
             return res.status(400).json({ message: 'Invalid exchange' });
         }
 
+        // VERIFY KEYS WITH CCXT
+        try {
+            let ccxtId = exchange_name.replace('_paper', '');
+            if (!ccxt[ccxtId]) {
+                return res.status(400).json({ message: 'Invalid exchange name' });
+            }
+
+            const exchange = new ccxt[ccxtId]();
+            exchange.apiKey = api_key;
+            exchange.secret = api_secret;
+            if (passphrase) exchange.password = passphrase;
+
+            if (exchange_name.includes('_paper')) {
+                exchange.setSandboxMode(true);
+            }
+
+            // Attempt to fetch balance to verify credentials
+            await exchange.fetchBalance();
+
+        } catch (verificationError) {
+            console.error(`Exchange verification failed for ${exchange_name}:`, verificationError.message);
+            // Return specific error message from exchange
+            return res.status(400).json({ message: `Verification failed: ${verificationError.message}` });
+        }
+
         const encryptedKey = encrypt(api_key);
         const encryptedSecret = encrypt(api_secret);
         const encryptedPassphrase = passphrase ? encrypt(passphrase) : null;
@@ -122,8 +147,58 @@ const addExchange = async (req, res) => {
     } catch (err) { console.error(err.message); res.status(500).send('Server Error'); }
 };
 
+const deleteExchange = async (req, res) => {
+    const { name } = req.params;
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        // 1. Get Exchange ID
+        const exQuery = await client.query("SELECT exchange_id FROM user_exchanges WHERE user_id = $1 AND exchange_name = $2", [req.user.id, name]);
+        if (exQuery.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ message: 'Exchange not found' });
+        }
+        const exchangeId = exQuery.rows[0].exchange_id;
+
+        // 2. Find Associated Bots
+        const botsQuery = await client.query("SELECT bot_id FROM bots WHERE user_id = $1 AND exchange_connection_id = $2", [req.user.id, exchangeId]);
+
+        // 3. Stop & Delete Bots
+        for (const bot of botsQuery.rows) {
+            try {
+                // Stop in Engine (fail-safe)
+                await axios.delete(`${TRADING_ENGINE_URL}/bot/${bot.bot_id}`);
+            } catch (e) {
+                console.error(`Failed to stop bot ${bot.bot_id} on engine:`, e.message);
+            }
+            // Delete from DB
+            await client.query("DELETE FROM bots WHERE bot_id = $1", [bot.bot_id]);
+        }
+
+        // 4. Delete Exchange
+        await client.query("DELETE FROM user_exchanges WHERE exchange_id = $1", [exchangeId]);
+
+        await client.query('COMMIT');
+        res.json({ message: 'Exchange disconnected and associated bots removed.' });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error(err.message);
+        res.status(500).send('Server Error');
+    } finally {
+        client.release();
+    }
+};
+
 const authExchange = (req, res) => { res.status(501).json({ message: "OAuth not implemented" }); };
 const authExchangeCallback = async (req, res) => { res.redirect(`${process.env.FRONTEND_URL}/dashboard`); };
+
+const getUserExchanges = async (req, res) => {
+    try {
+        const result = await pool.query('SELECT exchange_name, created_at, connection_type FROM user_exchanges WHERE user_id = $1', [req.user.id]);
+        res.json(result.rows);
+    } catch (err) { console.error(err.message); res.status(500).send('Server Error'); }
+};
 
 // ============================================================
 // 3. BOT MANAGEMENT
@@ -344,7 +419,14 @@ const deleteBot = async (req, res) => {
 const getUserBots = async (req, res) => {
     const { mode = 'live' } = req.query;
     try {
-        const botsQuery = await pool.query("SELECT * FROM bots WHERE user_id = $1 AND status != 'archived' AND bot_type != 'SKIPPED' ORDER BY created_at DESC", [req.user.id]);
+        const botsQuery = await pool.query(`
+            SELECT b.*, ue.exchange_name 
+            FROM bots b
+            LEFT JOIN user_exchanges ue ON b.exchange_connection_id = ue.exchange_id
+            WHERE b.user_id = $1 AND b.status != 'archived' AND b.bot_type != 'SKIPPED'
+            ORDER BY b.created_at DESC
+        `, [req.user.id]);
+
         const filteredBots = botsQuery.rows.filter(bot => {
             const cfg = typeof bot.config === 'string' ? JSON.parse(bot.config || '{}') : bot.config;
             return (cfg.mode || 'live') === mode;
@@ -366,10 +448,13 @@ const getDashboard = async (req, res) => {
     const { mode = 'live' } = req.query;
     try {
         // 1. Fetch User's Bots
-        const botsQuery = await pool.query(
-            "SELECT * FROM bots WHERE user_id = $1 AND bot_type != 'SKIPPED' ORDER BY created_at DESC",
-            [req.user.id]
-        );
+        const botsQuery = await pool.query(`
+            SELECT b.*, ue.exchange_name 
+            FROM bots b
+            LEFT JOIN user_exchanges ue ON b.exchange_connection_id = ue.exchange_id
+            WHERE b.user_id = $1 AND b.bot_type != 'SKIPPED'
+            ORDER BY b.created_at DESC
+        `, [req.user.id]);
 
         const filteredBots = botsQuery.rows.filter(bot => {
             const cfg = typeof bot.config === 'string' ? JSON.parse(bot.config || '{}') : bot.config;
@@ -517,11 +602,77 @@ const getPortfolio = async (req, res) => {
             return res.json({ totalValue: 0, assets: [], error: "Failed to fetch balance from exchange." });
         }
 
+        // 2a. Fetch Real-Time Allocations from Trading Engine
+        // This includes Locked Orders + Internal Bot Reserves
+        let reservedBalances = {};
+        try {
+            const engineUrl = process.env.TRADING_ENGINE_URL || "http://127.0.0.1:8000";
+            console.log(`[Portfolio] Fetching Allocations... URL: ${engineUrl} Mode: ${mode}`);
+
+            const allocRes = await axios.get(`${engineUrl}/allocations`, { params: { mode } });
+            reservedBalances = allocRes.data || {};
+            console.log(`[Portfolio] Engine Allocations Received:`, reservedBalances);
+        } catch (e) {
+            console.error("[Portfolio] Failed to fetch engine allocations:", e.message);
+            if (e.response) {
+                console.error("   Status:", e.response.status);
+                console.error("   Data:", e.response.data);
+            }
+        }
+
         const assetsList = [];
         const balances = balanceData.total || {};
+        const freeBalances = balanceData.free || {};
 
         Object.entries(balances).forEach(([symbol, amount]) => {
-            if (amount > 0) assetsList.push({ symbol, balance: amount });
+            if (amount > 0) {
+                // Safer 'free' extraction from Exchange
+                let exchangeFree = amount;
+                if (balanceData[symbol]) {
+                    if (balanceData[symbol].free !== undefined) exchangeFree = balanceData[symbol].free;
+                    else if (balanceData[symbol].used !== undefined) exchangeFree = amount - balanceData[symbol].used;
+                } else if (freeBalances[symbol] !== undefined) {
+                    exchangeFree = freeBalances[symbol];
+                }
+
+                // Apply Reservation Logic
+                // STRATEGY SPLIT:
+                // 1. PAPER TRADING: Exchange Balance is real, but Orders are virtual. 
+                //    The Exchange sees 100% Free. We must deduct EVERYTHING the bot thinks it owns (Idle + Locked).
+                // 2. LIVE TRADING: Exchange Balance reflects Locked orders.
+                //    We only need to deduct what the bot is holding as "Idle" (waiting to buy).
+
+                const alloc = reservedBalances[symbol] || { total: 0, idle: 0 };
+
+                // Select deduction amount based on mode
+                // If mode is paper, we treat Real Exchange Balance as "Gross Limit" and subtract everything.
+                const deductionAmount = (mode === 'paper') ? (alloc.total || 0) : (alloc.idle || 0);
+
+                let effectiveFree = exchangeFree - deductionAmount;
+
+                // Sanity Check: If Total - AllocTotal < Effective, clamp it?
+                // RealAvailable <= (Total - AllocTotal) is also a valid check for overall consistency.
+                const totalReserved = alloc.total || 0;
+                const theoreticalMax = amount - totalReserved;
+
+                // The final available should be the lowest of:
+                // 1. What the exchange says is free (minus what bots are holding idle)
+                // 2. What the wallet theoretically has left after all bot commitments
+                effectiveFree = Math.min(effectiveFree, theoreticalMax);
+
+                if (effectiveFree < 0) effectiveFree = 0;
+
+                if (totalReserved > 0) {
+                    console.log(`[Portfolio] ${symbol} Logic (${mode}): ExFree=${exchangeFree} - Deduct=${deductionAmount} = ${effectiveFree}. (TotalRes=${totalReserved}, TheoMax=${theoreticalMax})`);
+                }
+
+                assetsList.push({
+                    symbol,
+                    balance: amount, // Total
+                    free: effectiveFree, // Adjusted Available
+                    reserved: totalReserved // sending for debug if needed
+                });
+            }
         });
 
         // 3. Fetch Prices
@@ -802,5 +953,14 @@ module.exports = {
     getMe, updateProfile, addExchange, createBot, toggleBot, updateBot, deleteBot, getAvailableBots,
     authExchange, authExchangeCallback, getDashboard, getPortfolio,
     getUserBots, getMarketData, getMarketTickers, getMarketCandles, executeTradeSignal, recordBotTrade, runBacktest, getBacktests, saveBacktest, resumeActiveBots,
-    getSupportedExchanges
+    getBacktests,
+    saveBacktest,
+    runBacktest,
+    executeTradeSignal,
+    recordBotTrade,
+    getSupportedExchanges,
+    recordBotTrade,
+    getSupportedExchanges,
+    getUserExchanges,
+    deleteExchange
 };

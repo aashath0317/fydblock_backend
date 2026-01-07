@@ -7,6 +7,7 @@ CREATE TABLE users (
     full_name VARCHAR(255),
     country VARCHAR(100),
     phone_number VARCHAR(50),
+    slug VARCHAR(255) UNIQUE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

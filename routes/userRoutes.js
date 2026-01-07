@@ -11,6 +11,8 @@ const {
     deleteBot,          // "Delete" button
     toggleBot,          // <--- NEW: Pause/Resume Bot
     getAvailableBots,   // "Create New Bot" modal
+    getUserExchanges,   // <--- NEW: Get all connected exchanges
+    deleteExchange,     // <--- NEW: Delete exchange
     authExchange,
     authExchangeCallback,
     getDashboard,
@@ -35,6 +37,8 @@ router.put('/profile', protect, updateProfile);
 
 // --- Exchange Management ---
 router.post('/exchange', protect, addExchange);
+router.delete('/exchange/:name', protect, deleteExchange); // <--- NEW: Disconnect
+router.get('/exchanges', protect, getUserExchanges); // <--- NEW Route
 router.get('/exchange/supported', getSupportedExchanges);
 router.get('/exchange/auth/:exchange', authExchange);
 router.get('/exchange/callback/:exchange', authExchangeCallback);
