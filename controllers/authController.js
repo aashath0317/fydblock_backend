@@ -2,6 +2,8 @@ const pool = require('../db');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const sendEmail = require('../utils/sendEmail');
+const { getWelcomeEmailHtml } = require('../utils/emailTemplates');
 
 const { OAuth2Client } = require('google-auth-library');
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
@@ -75,6 +77,33 @@ const register = async (req, res) => {
         // Generate Token
         const token = jwt.sign({ id: newUser.rows[0].id }, process.env.JWT_SECRET, { expiresIn: '1h' });
 
+
+
+        // Generate Verification Code (6 Digits)
+        const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+
+        // Update user with verification token (storing code in same column)
+        await pool.query('UPDATE users SET verification_token = $1, is_verified = FALSE WHERE id = $2', [verificationCode, newUser.rows[0].id]);
+
+        // Send Welcome / Verification Email (Async - don't block response)
+        try {
+            const name = first_name || 'Trader';
+            const welcomeHtml = getWelcomeEmailHtml(name, verificationCode);
+
+            // Log that we are attempting to send
+            console.log(`[Register] Sending verification email to ${email}`);
+
+            await sendEmail({
+                email: email,
+                subject: 'Verify your Fydblock Email',
+                message: welcomeHtml
+            });
+
+        } catch (emailErr) {
+            console.error('[Register] Failed to send verification email:', emailErr.message);
+            // Don't fail registration just because email failed
+        }
+
         res.json({
             token,
             user: {
@@ -111,14 +140,36 @@ const login = async (req, res) => {
         // Generate Token
         const token = jwt.sign({ id: user.rows[0].id }, process.env.JWT_SECRET, { expiresIn: '1h' });
 
-        // ? CRITICAL FIX: Send 'role' in the response
+        // Check if verified
+        const isVerified = user.rows[0].is_verified;
+
+        // If NOT verified, send a fresh code so they can verify immediately
+        if (!isVerified) {
+            const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+            await pool.query('UPDATE users SET verification_token = $1 WHERE id = $2', [verificationCode, user.rows[0].id]);
+
+            try {
+                const name = user.rows[0].first_name || user.rows[0].slug || 'Trader';
+                const welcomeHtml = getWelcomeEmailHtml(name, verificationCode);
+                await sendEmail({
+                    email: email,
+                    subject: 'Verify your Fydblock Email',
+                    message: welcomeHtml
+                });
+            } catch (emailErr) {
+                console.error('[Login] Failed to send verification email:', emailErr.message);
+            }
+        }
+
+        // ? CRITICAL FIX: Send 'role' and 'is_verified' in the response
         res.json({
             token,
             user: {
                 id: user.rows[0].id,
                 email: user.rows[0].email,
                 role: user.rows[0].role,
-                slug: user.rows[0].slug
+                slug: user.rows[0].slug,
+                is_verified: user.rows[0].is_verified
             }
         });
 
@@ -199,4 +250,176 @@ const googleAuth = async (req, res) => {
     }
 };
 
-module.exports = { register, login, googleAuth };
+// 4. FORGOT PASSWORD
+const forgotPassword = async (req, res) => {
+    const { email } = req.body;
+
+    try {
+        // 1. Get user based on POSTed email
+        const user = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+        if (user.rows.length === 0) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        // 2. Generate the random reset token
+        const resetToken = crypto.randomBytes(32).toString('hex');
+
+        // 3. Hash it and set to reset_password_token field in DB
+        // hash using sha256
+        const hashedToken = crypto.createHash('sha256').update(resetToken).digest('hex');
+
+        // Expires in 1 hour
+        // Note: We need to store BIGINT or TIMESTAMP. Let's assume BIGINT for now as per plan, 
+        // or usage of CURRENT_TIMESTAMP + interval. 
+        // JS Date.now() + 1 hour = milliseconds.
+        const expires = Date.now() + 3600000;
+
+        // Update user
+        await pool.query(
+            'UPDATE users SET reset_password_token = $1, reset_password_expires = $2 WHERE email = $3',
+            [hashedToken, expires, email]
+        );
+
+        // 4. Send it to user's email
+        // Logic for reset URL
+        // const resetUrl = `${req.protocol}://${req.get('host')}/reset-password/${resetToken}`;
+        // BUT we need frontend URL. Typically this comes from env or we assume localhost/production url.
+        // Let's use a standard construct or env.
+        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+        const resetUrl = `${frontendUrl}/reset-password/${resetToken}`;
+
+        const message = `
+            <h1>You have requested a password reset</h1>
+            <p>Please go to this link to reset your password:</p>
+            <a href="${resetUrl}" clicktracking=off>${resetUrl}</a>
+            <p>If you didn't request this, please ignore this email.</p>
+        `;
+
+        try {
+            await sendEmail({
+                email: user.rows[0].email,
+                subject: 'Password Reset Request',
+                message
+            });
+
+            res.status(200).json({ status: 'success', message: 'Token sent to email!' });
+        } catch (err) {
+            // cleanup if email fails
+            await pool.query(
+                'UPDATE users SET reset_password_token = NULL, reset_password_expires = NULL WHERE email = $1',
+                [email]
+            );
+            console.error('Email send error:', err);
+            return res.status(500).json({ message: 'There was an error sending the email. Try again later!' });
+        }
+
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+// 5. RESET PASSWORD
+const resetPassword = async (req, res) => {
+    // 1. Get user based on token
+    const hashedToken = crypto.createHash('sha256').update(req.params.token).digest('hex');
+
+    try {
+        // Find user with token and valid expiry
+        // Note: Date.now() is ms. Ensure DB column is big enough or use timestamp comparison.
+        // If 'reset_password_expires' is BIGINT (ms):
+        const user = await pool.query(
+            'SELECT * FROM users WHERE reset_password_token = $1 AND reset_password_expires > $2',
+            [hashedToken, Date.now()]
+        );
+
+        if (user.rows.length === 0) {
+            return res.status(400).json({ message: 'Token is invalid or has expired' });
+        }
+
+        // 2. Set new password
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(req.body.password, salt);
+
+        // 3. Update DB, clear reset fields
+        await pool.query(
+            'UPDATE users SET password = $1, reset_password_token = NULL, reset_password_expires = NULL WHERE id = $2',
+            [hashedPassword, user.rows[0].id]
+        );
+
+        // 4. Log user in? Or just send success.
+        // Just send success, let them login.
+
+        // Optional: Reset all exchange connections as per warning in UI? 
+        // "Performing a password reset via email confirmation will reset the API connections..."
+        // If that is a requirement:
+        // await pool.query('DELETE FROM user_exchanges WHERE user_id = $1', [user.rows[0].id]);
+
+        res.status(200).json({ status: 'success', message: 'Password Reset Successfully!' });
+
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: 'Server Error' });
+    }
+};
+
+// 6. VERIFY EMAIL
+// 6. VERIFY EMAIL (OTP)
+const verifyEmail = async (req, res) => {
+    const { code } = req.body; // User enters code
+    const userId = req.user.id; // From Bearer Token
+
+    try {
+        const user = await pool.query('SELECT verification_token FROM users WHERE id = $1', [userId]);
+
+        if (user.rows.length === 0) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        // Compare stored code
+        // Note: verification_token column is holding the OTP code now
+        if (user.rows[0].verification_token !== code) {
+            return res.status(400).json({ message: 'Invalid verification code' });
+        }
+
+        await pool.query('UPDATE users SET is_verified = TRUE, verification_token = NULL WHERE id = $1', [userId]);
+
+        res.json({ message: 'Email verified successfully', is_verified: true });
+    } catch (err) {
+        res.status(500).send('Server Error');
+    }
+};
+
+// 7. RESEND VERIFICATION CODE
+const resendVerificationCode = async (req, res) => {
+    const userId = req.user.id;
+    try {
+        const user = await pool.query('SELECT email, full_name, slug FROM users WHERE id = $1', [userId]);
+        if (user.rows.length === 0) return res.status(404).json({ message: 'User not found' });
+
+        const { email, full_name, slug } = user.rows[0];
+        // Use full_name or slug or just 'Trader' for name
+        const name = full_name || slug || 'Trader';
+
+        // Generate New Code
+        const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+
+        // Update DB
+        await pool.query('UPDATE users SET verification_token = $1 WHERE id = $2', [verificationCode, userId]);
+
+        // Send Email
+        const welcomeHtml = getWelcomeEmailHtml(name, verificationCode);
+        await sendEmail({
+            email: email,
+            subject: 'Resend: Verify your Fydblock Email',
+            message: welcomeHtml
+        });
+
+        res.json({ message: 'Verification code sent successfully' });
+    } catch (err) {
+        console.error("Resend Email Error:", err.message);
+        res.status(500).json({ message: `Failed to send email: ${err.message}` });
+    }
+};
+
+module.exports = { register, login, googleAuth, forgotPassword, resetPassword, verifyEmail, resendVerificationCode };

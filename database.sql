@@ -8,6 +8,10 @@ CREATE TABLE users (
     country VARCHAR(100),
     phone_number VARCHAR(50),
     slug VARCHAR(255) UNIQUE,
+    is_verified BOOLEAN DEFAULT FALSE, -- Email Verification Status
+    verification_token VARCHAR(255),
+    reset_password_token VARCHAR(255),
+    reset_password_expires BIGINT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

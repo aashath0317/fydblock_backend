@@ -14,7 +14,7 @@ const BOT_SECRET = process.env.BOT_SECRET || 'my_super_secure_bot_secret_123';
 
 const getMe = async (req, res) => {
     try {
-        const userQuery = await pool.query('SELECT id, email, full_name, country, phone_number, role FROM users WHERE id = $1', [req.user.id]);
+        const userQuery = await pool.query('SELECT id, email, full_name, country, phone_number, role, is_verified FROM users WHERE id = $1', [req.user.id]);
         if (userQuery.rows.length === 0) return res.status(404).json({ message: 'User not found' });
 
         const user = userQuery.rows[0];
@@ -30,7 +30,8 @@ const getMe = async (req, res) => {
             botCreated: botQuery.rows.length > 0,
             hasExchange: (liveExQuery.rows.length > 0 || paperExQuery.rows.length > 0),
             hasLiveExchange: liveExQuery.rows.length > 0,
-            hasPaperExchange: paperExQuery.rows.length > 0
+            hasPaperExchange: paperExQuery.rows.length > 0,
+            is_verified: user.is_verified // New field
         });
     } catch (err) { console.error(err.message); res.status(500).send('Server Error'); }
 };

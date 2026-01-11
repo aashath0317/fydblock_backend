@@ -7,12 +7,50 @@ const ccxt = require('ccxt');
 const { decrypt } = require('./utils/encryption');
 
 // Load env vars
+// Load env vars
 dotenv.config();
+
+// --- CUSTOM LOGGING START ---
+const fs = require('fs');
+const path = require('path');
+const util = require('util');
+
+const logDir = path.join(__dirname, 'logs');
+if (!fs.existsSync(logDir)) {
+    fs.mkdirSync(logDir);
+}
+
+const logFile = fs.createWriteStream(path.join(logDir, 'system.log'), { flags: 'a' });
+const logStdout = process.stdout;
+const logStderr = process.stderr;
+
+console.log = function () {
+    const timestamp = new Date().toISOString();
+    logFile.write(`[${timestamp}] [INFO] ` + util.format.apply(null, arguments) + '\n');
+    logStdout.write(`[${timestamp}] [INFO] ` + util.format.apply(null, arguments) + '\n');
+};
+
+console.error = function () {
+    const timestamp = new Date().toISOString();
+    logFile.write(`[${timestamp}] [ERROR] ` + util.format.apply(null, arguments) + '\n');
+    logStderr.write(`[${timestamp}] [ERROR] ` + util.format.apply(null, arguments) + '\n');
+};
+// --- CUSTOM LOGGING END ---
 
 // Routes Imports
 const authRoutes = require('./routes/authRoutes');
 const userRoutes = require('./routes/userRoutes');
 const adminRoutes = require('./routes/adminRoutes');
+const blogRoutes = require('./routes/blogRoutes');
+const sendEmail = require('./utils/sendEmail');
+const {
+    getWelcomeEmailHtml,
+    getNewLoginEmailHtml,
+    getApiConnectionLostEmailHtml,
+    getTargetReachedEmailHtml,
+    getPaymentConfirmedEmailHtml,
+    getPaymentFailedEmailHtml
+} = require('./utils/emailTemplates');
 
 const app = express();
 
@@ -24,6 +62,51 @@ app.use(express.json({ limit: '50mb' }));
 app.use('/api/auth', authRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/blogs', blogRoutes);
+
+// --- TEST EMAIL ROUTES (DEV ONLY) ---
+app.post('/api/test-email', async (req, res) => {
+    const { type, email } = req.body;
+    let html = '';
+    let subject = 'Fydblock Test Email';
+
+    try {
+        switch (type) {
+            case 'welcome':
+                html = getWelcomeEmailHtml('Admin');
+                subject = 'Welcome to Fydblock';
+                break;
+            case 'login':
+                html = getNewLoginEmailHtml('Admin', 'Chrome on Windows', 'New York, USA', 'Jan 09, 2026 - 05:30 PM', '192.168.1.1');
+                subject = 'New Login Detected';
+                break;
+            case 'api_lost':
+                html = getApiConnectionLostEmailHtml('Admin', 'Binance');
+                subject = 'API Connection Lost';
+                break;
+            case 'target':
+                html = getTargetReachedEmailHtml('Admin', 'BTC-Scalper-01', '4.5', 'BTC/USDT');
+                subject = 'Target Reached';
+                break;
+            case 'payment_confirmed':
+                html = getPaymentConfirmedEmailHtml('Admin', 'Pro Trader Monthly', 'Jan 09, 2026', '$290.00 USD');
+                subject = 'Payment Confirmed';
+                break;
+            case 'payment_failed':
+                html = getPaymentFailedEmailHtml('Admin');
+                subject = 'Payment Failed';
+                break;
+            default:
+                return res.status(400).send('Invalid type');
+        }
+
+        await sendEmail({ email, subject, message: html });
+        res.json({ message: `Sent ${type} email to ${email}` });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: err.message });
+    }
+});
 
 // Health Check
 app.get('/', (req, res) => {
