@@ -39,7 +39,15 @@ const getMe = async (req, res) => {
 const updateProfile = async (req, res) => {
     const { full_name, country, phone } = req.body;
     try {
-        const updatedUser = await pool.query('UPDATE users SET full_name = $1, country = $2, phone_number = $3 WHERE id = $4 RETURNING *', [full_name, country, phone, req.user.id]);
+        const updatedUser = await pool.query(
+            `UPDATE users 
+             SET full_name = COALESCE($1, full_name), 
+                 country = COALESCE($2, country), 
+                 phone_number = COALESCE($3, phone_number) 
+             WHERE id = $4 
+             RETURNING *`,
+            [full_name, country, phone, req.user.id]
+        );
         res.json(updatedUser.rows[0]);
     } catch (err) { console.error(err.message); res.status(500).send('Server Error'); }
 };

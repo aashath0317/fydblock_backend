@@ -12,6 +12,7 @@ CREATE TABLE users (
     verification_token VARCHAR(255),
     reset_password_token VARCHAR(255),
     reset_password_expires BIGINT,
+    referred_by INTEGER REFERENCES users(id), -- Added for Affiliate System
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

@@ -42,6 +42,7 @@ const authRoutes = require('./routes/authRoutes');
 const userRoutes = require('./routes/userRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const blogRoutes = require('./routes/blogRoutes');
+const partnerRoutes = require('./routes/partnerRoutes');
 const sendEmail = require('./utils/sendEmail');
 const {
     getWelcomeEmailHtml,
@@ -63,6 +64,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/blogs', blogRoutes);
+app.use('/api/partner', partnerRoutes);
 
 // --- TEST EMAIL ROUTES (DEV ONLY) ---
 app.post('/api/test-email', async (req, res) => {

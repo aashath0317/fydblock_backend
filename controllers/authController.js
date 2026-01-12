@@ -30,7 +30,8 @@ const generateUniqueSlug = async (baseName) => {
 
 // 1. REGISTER USER
 const register = async (req, res) => {
-    const { email, password, first_name, last_name } = req.body;
+    const { email, password, first_name, last_name, referral_code } = req.body;
+    console.log(`[Register] Attempting register for ${email}. Referral Code: ${referral_code}`);
 
     try {
         // Check if user exists
@@ -49,35 +50,36 @@ const register = async (req, res) => {
         else if (last_name) baseSlug = last_name;
         else if (email) baseSlug = email.split('@')[0];
 
-        if (first_name && last_name) baseSlug = `${first_name}${last_name}`; // Priority 3 override? Logic says 1: first, 2: last, 3: combo. Let's stick to a robust fallback.
-
-        // Refined Logic based on requirements:
-        // Priority 1: first_name
-        // Priority 2: last_name
-        // Priority 3: first + last
-
+        // Refined Logic based on requirements
         let slugCandidate = '';
         if (first_name) slugCandidate = first_name;
         else if (last_name) slugCandidate = last_name;
         else slugCandidate = email.split('@')[0]; // Fallback
 
-        // If collision check happens inside generateUniqueSlug, we just need a good base.
-        // Actually the requirement says: "If jack exists -> jack_1".
-        // So passing just "jack" (first name) is correct.
-
         const slug = await generateUniqueSlug(slugCandidate);
 
+        // Handle Referral
+        let referredBy = null;
+        if (referral_code) {
+            const cleanCode = referral_code.trim();
+            console.log(`[Register] Looking for referrer with slug: '${cleanCode}'`);
+            const referrerRes = await pool.query('SELECT id FROM users WHERE slug = $1', [cleanCode]);
+            if (referrerRes.rows.length > 0) {
+                referredBy = referrerRes.rows[0].id;
+                console.log(`[Register] Found Referrer ID: ${referredBy}`);
+            } else {
+                console.warn(`[Register] Referrer NOT FOUND for slug: '${cleanCode}'`);
+            }
+        }
 
         // Insert into DB
         const newUser = await pool.query(
-            'INSERT INTO users (email, password, slug, full_name) VALUES ($1, $2, $3, $4) RETURNING id, email, role, slug',
-            [email, hashedPassword, slug, `${first_name || ''} ${last_name || ''}`.trim()]
+            'INSERT INTO users (email, password, slug, full_name, referred_by) VALUES ($1, $2, $3, $4, $5) RETURNING id, email, role, slug',
+            [email, hashedPassword, slug, `${first_name || ''} ${last_name || ''}`.trim(), referredBy]
         );
 
         // Generate Token
         const token = jwt.sign({ id: newUser.rows[0].id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-
-
 
         // Generate Verification Code (6 Digits)
         const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
@@ -89,8 +91,6 @@ const register = async (req, res) => {
         try {
             const name = first_name || 'Trader';
             const welcomeHtml = getWelcomeEmailHtml(name, verificationCode);
-
-            // Log that we are attempting to send
             console.log(`[Register] Sending verification email to ${email}`);
 
             await sendEmail({
@@ -101,7 +101,6 @@ const register = async (req, res) => {
 
         } catch (emailErr) {
             console.error('[Register] Failed to send verification email:', emailErr.message);
-            // Don't fail registration just because email failed
         }
 
         res.json({
@@ -181,7 +180,7 @@ const login = async (req, res) => {
 
 // 3. GOOGLE LOGIN/REGISTER
 const googleAuth = async (req, res) => {
-    const { token } = req.body;
+    const { token, referral_code } = req.body;
 
     try {
         // Verify the token
@@ -225,9 +224,18 @@ const googleAuth = async (req, res) => {
             const base = given_name || family_name || email.split('@')[0];
             slug = await generateUniqueSlug(base);
 
+            // Handle Referral
+            let referredBy = null;
+            if (referral_code) {
+                const referrerRes = await pool.query('SELECT id FROM users WHERE slug = $1', [referral_code]);
+                if (referrerRes.rows.length > 0) {
+                    referredBy = referrerRes.rows[0].id;
+                }
+            }
+
             const newUser = await pool.query(
-                'INSERT INTO users (email, google_id, slug, full_name) VALUES ($1, $2, $3, $4) RETURNING id',
-                [email, googleId, slug, name]
+                'INSERT INTO users (email, google_id, slug, full_name, referred_by) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+                [email, googleId, slug, name, referredBy]
             );
             userId = newUser.rows[0].id;
         }
