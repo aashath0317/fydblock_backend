@@ -958,6 +958,46 @@ const runBacktest = async (req, res) => {
 const getBacktests = async (req, res) => { res.json([]); };
 const saveBacktest = async (req, res) => { res.json({ message: "Saved" }); };
 
+const getTopGainers = async (req, res) => {
+    console.log("?? [TopGainers] Request received");
+    try {
+        // Use Binance as default for global top gainers
+        const exchangeId = 'binance';
+        if (!ccxt[exchangeId]) {
+            console.log("?? [TopGainers] Binance not found in CCXT");
+            return res.json([]);
+        }
+
+        console.log("?? [TopGainers] Initializing CCXT Binance...");
+        const exchange = new ccxt[exchangeId]({ enableRateLimit: true });
+
+        // Some exchanges require loadMarkets
+        // await exchange.loadMarkets(); // Binance usually doesn't 'require' it for public fetchTickers, but good practice.
+
+        console.log("?? [TopGainers] Fetching tickers...");
+        // Fetch all tickers
+        const tickers = await exchange.fetchTickers();
+        console.log(`?? [TopGainers] Fetched ${Object.keys(tickers).length} tickers. Processing...`);
+
+        // Filter valid USDT pairs and sort by percentage change
+        const gainers = Object.values(tickers)
+            .filter(t => t.symbol && t.symbol.endsWith('/USDT') && t.percentage !== undefined)
+            .sort((a, b) => b.percentage - a.percentage) // Descending
+            .slice(0, 5) // Top 5
+            .map(t => ({
+                pair: t.symbol,
+                price: t.last,
+                change: t.percentage
+            }));
+
+        console.log("?? [TopGainers] Sending response:", gainers);
+        res.json(gainers);
+    } catch (err) {
+        console.error("?? [TopGainers] ERROR:", err.message);
+        res.status(500).json({ message: "Failed to fetch top gainers" });
+    }
+};
+
 module.exports = {
     getMe, updateProfile, addExchange, createBot, toggleBot, updateBot, deleteBot, getAvailableBots,
     authExchange, authExchangeCallback, getDashboard, getPortfolio,
@@ -971,5 +1011,6 @@ module.exports = {
     recordBotTrade,
     getSupportedExchanges,
     getUserExchanges,
-    deleteExchange
+    deleteExchange,
+    getTopGainers // <--- EXPORTED
 };

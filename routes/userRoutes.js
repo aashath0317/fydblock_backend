@@ -26,7 +26,8 @@ const {
     runBacktest,        // Sends request TO Python Engine
     executeTradeSignal, // Legacy signal handler
     recordBotTrade,      // <--- NEW: Receives trades FROM Python Engine
-    getSupportedExchanges
+    getSupportedExchanges,
+    getTopGainers // <--- Imported
 } = require('../controllers/userController');
 
 const { protect } = require('../middleware/authMiddleware');
@@ -59,6 +60,7 @@ router.get('/portfolio', protect, getPortfolio);
 router.get('/market-data', getMarketData);
 router.get('/market-tickers', getMarketTickers);
 router.get('/market-candles', getMarketCandles);
+router.get('/market-top-gainers', getTopGainers); // <--- NEW Public Route
 
 // --- Backtesting Routes ---
 router.get('/backtests', protect, getBacktests);
