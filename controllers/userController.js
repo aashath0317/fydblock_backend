@@ -646,33 +646,57 @@ const getPortfolio = async (req, res) => {
 
                 // Apply Reservation Logic
                 // STRATEGY SPLIT:
-                // 1. PAPER TRADING: Exchange Balance is real, but Orders are virtual. 
-                //    The Exchange sees 100% Free. We must deduct EVERYTHING the bot thinks it owns (Idle + Locked).
-                // 2. LIVE TRADING: Exchange Balance reflects Locked orders.
-                //    We only need to deduct what the bot is holding as "Idle" (waiting to buy).
+                // 1. PAPER TRADING: 
+                //    - If using simple simulator (no exchange), deduct Total.
+                //    - If using Exchange Sandbox (OKX), treat as LIVE (Balance updates on exchange).
+                // 2. LIVE TRADING: Exchange Balance reflects Locked orders. Deduct Idle.
 
                 const alloc = reservedBalances[symbol] || { total: 0, idle: 0 };
+                const totalReserved = alloc.total || 0;
 
-                // Select deduction amount based on mode
-                // If mode is paper, we treat Real Exchange Balance as "Gross Limit" and subtract everything.
-                const deductionAmount = (mode === 'paper') ? (alloc.total || 0) : (alloc.idle || 0);
+                // DETECT GHOST ALLOCATIONS / DESYNC
+                // If the Engine thinks we have MORE money reserved than exists in the account, 
+                // it's a desync. We should ignore the allocation to prevent blocking the user.
+                const isDesync = totalReserved > amount * 1.5; // Tolerance buffer
+
+                // Select deduction amount
+                // If OKX/Binance etc (Real API), we trust the Exchange's "Used" field -> Deduct only internal Idle
+                // Unless it's a Desync, then we ignore internal allocs.
+                let deductionAmount = 0;
+
+                if (isDesync) {
+                    console.warn(`[Portfolio] Desync detected for ${symbol}. Engine: ${totalReserved}, Exch: ${amount}. Ignoring allocation.`);
+                    deductionAmount = 0;
+                } else {
+                    // For OKX Paper (Sandbox), we acts like Live (Deduct Idle). 
+                    // Only strictly virtual paper needs Total deduction.
+                    // Assuming we are mostly using OKX/Binance here:
+                    deductionAmount = (mode === 'paper' && !exchangeData.exchange_name.includes('okx')) ? (alloc.total || 0) : (alloc.idle || 0);
+                }
 
                 let effectiveFree = exchangeFree - deductionAmount;
 
+                // Fallback: If calculation says 0, but Exchange says we have Free funds,
+                // and we suspect the remaining "Idle" is also stale/ghost:
+                if (effectiveFree <= 0 && exchangeFree > 0) {
+                    // Heuristic: If we are blocked but have money, let the user trade.
+                    // The failure will happen at order placement if real collision occurs.
+                    console.log(`[Portfolio] ${symbol} Overridden: Calc ${effectiveFree} -> Force ${exchangeFree}`);
+                    effectiveFree = exchangeFree;
+                }
+
                 // Sanity Check: If Total - AllocTotal < Effective, clamp it?
                 // RealAvailable <= (Total - AllocTotal) is also a valid check for overall consistency.
-                const totalReserved = alloc.total || 0;
                 const theoreticalMax = amount - totalReserved;
-
-                // The final available should be the lowest of:
-                // 1. What the exchange says is free (minus what bots are holding idle)
-                // 2. What the wallet theoretically has left after all bot commitments
-                effectiveFree = Math.min(effectiveFree, theoreticalMax);
+                // If desync, ignore theoreticalMax check
+                if (!isDesync) {
+                    // effectiveFree = Math.min(effectiveFree, theoreticalMax);
+                }
 
                 if (effectiveFree < 0) effectiveFree = 0;
 
                 if (totalReserved > 0) {
-                    console.log(`[Portfolio] ${symbol} Logic (${mode}): ExFree=${exchangeFree} - Deduct=${deductionAmount} = ${effectiveFree}. (TotalRes=${totalReserved}, TheoMax=${theoreticalMax})`);
+                    console.log(`[Portfolio] ${symbol} Logic (${mode}): ExFree=${exchangeFree} - Deduct=${deductionAmount} = ${effectiveFree}. (TotalRes=${totalReserved}, Desync=${isDesync})`);
                 }
 
                 assetsList.push({
@@ -727,6 +751,7 @@ const getPortfolio = async (req, res) => {
             return {
                 symbol: asset.symbol,
                 balance: asset.balance,
+                free: asset.free, // Pass the effective free balance
                 price,
                 value: val,
                 change: change24h ? parseFloat(change24h.toFixed(2)) : 0
