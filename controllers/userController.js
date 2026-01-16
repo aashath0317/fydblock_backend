@@ -454,7 +454,7 @@ const getUserBots = async (req, res) => {
 };
 
 const getDashboard = async (req, res) => {
-    const { mode = 'live' } = req.query;
+    const { mode = 'live', timeframe = '1d' } = req.query; // Default to 1d
     try {
         // 1. Fetch User's Bots
         const botsQuery = await pool.query(`
@@ -470,82 +470,155 @@ const getDashboard = async (req, res) => {
             return (cfg.mode || 'live') === mode;
         });
 
-        // 2. Calculate Bot Stats
+
+        // 2. Calculate Bot Stats (Current Totals) & Fetch Sparklines
         let totalBotProfit = 0;
         let activeInvestment = 0;
 
-        filteredBots.forEach(bot => {
+        // Use Promise.all to fetch sparklines in parallel
+        await Promise.all(filteredBots.map(async (bot) => {
             let config = typeof bot.config === 'string' ? JSON.parse(bot.config) : bot.config;
             totalBotProfit += parseFloat(config.total_profit || 0);
             activeInvestment += parseFloat(config.strategy?.investment || 0);
-        });
 
-        // 3. Fetch Portfolio History (For Chart & Asset Value)
-        // We get the last 30 snapshots to draw the chart
-        const tableName = mode === 'live' ? 'portfolio_snapshots_live' : 'portfolio_snapshots_paper';
-        const historyQuery = await pool.query(
-            `SELECT total_value, recorded_at 
-                 FROM ${tableName} 
-                 WHERE user_id = $1 
-                 ORDER BY recorded_at ASC 
-                 LIMIT 30`,
-            [req.user.id] // 'live' or 'paper' passed from frontend
-        );
+            // Fetch last 25 snapshots for this bot for the sparkline (24h + current)
+            try {
+                const sparkRes = await pool.query(
+                    `SELECT total_profit FROM bot_snapshots 
+                     WHERE bot_id = $1 
+                     ORDER BY recorded_at DESC 
+                     LIMIT 25`,
+                    [bot.bot_id]
+                );
+                // Store as [oldest, ..., newest]
+                bot.sparkline = sparkRes.rows.map(r => parseFloat(r.total_profit)).reverse();
+            } catch (e) {
+                bot.sparkline = [];
+            }
+        }));
 
-        const history = historyQuery.rows;
+        // 3. FETCH CHART DATA (Grid Profit History)
+        // Rules:
+        // 1h -> Last 30 hours
+        // 3h -> Last 90 hours
+        // 1d -> Last 30 days
+        // 1w -> Last 30 weeks
+        // 1m -> Last 30 months
 
-        // 4. Calculate "Assets Value" (Current Equity)
-        // If we have history, use the last record. If not, use Active Investment as a fallback.
-        const currentEquity = history.length > 0
-            ? parseFloat(history[history.length - 1].total_value)
-            : activeInvestment;
+        // Map timeframe to SQL interval
+        const timeframeMap = {
+            '1h': { interval: "30 hours", step: 1 },         // Every 1 hour (as is)
+            '3h': { interval: "90 hours", step: 3 },         // Every 3rd hour
+            '1d': { interval: "30 days", step: 24 },         // Every 24th hour
+            '1w': { interval: "30 weeks", step: 168 },       // Every 168th hour
+            '1m': { interval: "30 months", step: 720 },      // Approx 720 hours (30 days)
+        };
 
-        // 5. Calculate "30 Days Profit" (Change since first record)
-        let profit30d = 0;
-        let profitPercent = 0;
+        const tfConfig = timeframeMap[timeframe] || timeframeMap['1d'];
 
-        if (history.length > 0) {
-            const startValue = parseFloat(history[0].total_value);
-            profit30d = currentEquity - startValue;
-            if (startValue > 0) {
-                profitPercent = ((profit30d / startValue) * 100).toFixed(2);
+        // Complex Query:
+        // 1. Join bot_snapshots with bots to filter by user and mode.
+        // 2. Group by rounded timestamp (hour) to sum profits across all bots.
+        // 3. Filter by time range.
+        const profitHistoryQuery = await pool.query(`
+            SELECT 
+                date_trunc('hour', bs.recorded_at) as snapshot_time,
+                SUM(bs.total_profit) as value
+            FROM bot_snapshots bs
+            JOIN bots b ON bs.bot_id = b.bot_id
+            WHERE b.user_id = $1 
+              AND (b.config::json->>'mode')::text = $2
+              AND bs.recorded_at > NOW() - $3::interval
+            GROUP BY snapshot_time
+            ORDER BY snapshot_time ASC
+        `, [req.user.id, mode, tfConfig.interval]);
+
+        // Downsampling in JS (Simpler than SQL modulo on timestamps)
+        const rawData = profitHistoryQuery.rows;
+        const chartData = [];
+
+        // If data is empty, maybe send a single point 0? or empty array
+        if (rawData.length > 0) {
+            // We iterate and pick every Nth item
+            // Using a simple loop
+            for (let i = 0; i < rawData.length; i += tfConfig.step) {
+                // Determine label format based on timeframe
+                const d = new Date(rawData[i].snapshot_time);
+                let label = "";
+                if (timeframe === '1h' || timeframe === '3h') {
+                    label = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+                } else {
+                    label = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                }
+
+                chartData.push({
+                    date: label,
+                    value: parseFloat(rawData[i].value)
+                });
             }
         }
 
-        // 6. Format Chart Data for Frontend
-        // We map database timestamps to readable labels (e.g., "Nov 10")
-        const chartData = history.map(record => ({
-            date: new Date(record.recorded_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-            value: parseFloat(record.total_value)
-        }));
+        // Ensure we don't exceed 31 points (as requested "remove old snapshot of 1st one")
+        // though logic above roughly yields 30.
+        const finalChartData = chartData.slice(-31);
+
+
+        // 4. Calculate Portfolio Stats (Assets Value & 30d PnL)
+        // This comes from portfolio_snapshots (Equity)
+        const tableName = mode === 'live' ? 'portfolio_snapshots_live' : 'portfolio_snapshots_paper';
+        const portfolioHistoryQuery = await pool.query(
+            `SELECT total_value, recorded_at FROM ${tableName} WHERE user_id = $1 ORDER BY recorded_at ASC`,
+            [req.user.id]
+        );
+        const portfolioHistory = portfolioHistoryQuery.rows;
+
+        const currentEquity = portfolioHistory.length > 0
+            ? parseFloat(portfolioHistory[portfolioHistory.length - 1].total_value)
+            : activeInvestment; // Fallback to investment
+
+        // PnL (30d)
+        let profit30d = 0;
+        let profitPercent = 0;
+        // Find record ~30 days ago
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+        const oldRecord = portfolioHistory.find(p => new Date(p.recorded_at) >= thirtyDaysAgo);
+        if (oldRecord) {
+            const startValue = parseFloat(oldRecord.total_value);
+            profit30d = currentEquity - startValue;
+            if (startValue > 0) profitPercent = ((profit30d / startValue) * 100).toFixed(2);
+        } else if (portfolioHistory.length > 0) {
+            // If < 30 days history, use oldest
+            const startValue = parseFloat(portfolioHistory[0].total_value);
+            profit30d = currentEquity - startValue;
+            if (startValue > 0) profitPercent = ((profit30d / startValue) * 100).toFixed(2);
+        }
 
         // --- FINAL RESPONSE ---
         res.json({
             stats: [
-                // Card 1: Today's Profit (Bot Profit)
                 {
                     title: "Total Bot Profit",
                     value: `$${totalBotProfit.toFixed(2)}`,
                     percentage: activeInvestment > 0 ? `+${((totalBotProfit / activeInvestment) * 100).toFixed(2)}%` : "0.00%",
                     isPositive: true
                 },
-                // Card 2: 30 Days Profit (Portfolio Growth)
                 {
                     title: "30 Days PnL",
                     value: `$${profit30d.toFixed(2)}`,
                     percentage: `${profitPercent}%`,
                     isPositive: profit30d >= 0
                 },
-                // Card 3: Assets Value (Total Equity) -> FIXED: Was showing bot count
                 {
                     title: "Assets Value",
                     value: `$${currentEquity.toLocaleString(undefined, { minimumFractionDigits: 2 })}`,
-                    percentage: `${filteredBots.length} Bots`, // Moved count here
+                    percentage: `${filteredBots.length} Bots`,
                     isPositive: true
                 },
             ],
             bots: filteredBots,
-            chartData: chartData // <--- Sending real chart data now
+            chartData: finalChartData
         });
 
     } catch (err) {

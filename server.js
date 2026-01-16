@@ -119,8 +119,10 @@ app.get('/', (req, res) => {
 // Runs every 30 minutes
 // --- AUTOMATIC SNAPSHOT TASK (Cron Job) ---
 // Runs every 30 minutes
-cron.schedule('*/30 * * * *', async () => {
-    console.log(`[${new Date().toISOString()}] ?? Taking portfolio snapshots...`);
+// --- AUTOMATIC SNAPSHOT TASK (Cron Job) ---
+// Runs every hour
+cron.schedule('0 * * * *', async () => {
+    console.log(`[${new Date().toISOString()}] 📸 Taking portfolio & profit snapshots...`);
 
     try {
         // 1. Get all users who have connected exchanges
@@ -134,100 +136,90 @@ cron.schedule('*/30 * * * *', async () => {
 
         for (const record of usersWithKeys.rows) {
             try {
-                // 2. Decrypt Keys
-                const apiKey = decrypt(record.api_key);
-                const apiSecret = decrypt(record.api_secret);
-                const passphrase = record.passphrase ? decrypt(record.passphrase) : undefined;
-
-                // 3. Connect to Exchange
-                const exchangeId = record.exchange_name.replace('_paper', '').toLowerCase();
-                if (!ccxt[exchangeId]) continue;
-
-                const exchange = new ccxt[exchangeId]({
-                    apiKey,
-                    secret: apiSecret,
-                    password: passphrase,
-                    enableRateLimit: true
-                });
-
-                // Handle Paper Trading / Sandbox
-                if (record.exchange_name.includes('_paper')) {
-                    if (exchange.has['sandbox']) exchange.setSandboxMode(true);
-                }
-
-                // 4. Fetch Total Balance (Equity)
-                // Determine mode based on exchange name tag
+                // Determine mode
                 const mode = record.exchange_name.includes('_paper') ? 'paper' : 'live';
 
-                const balance = await exchange.fetchBalance();
-                let totalEquity = 0;
+                // --- A. SAVE BOT PROFIT SNAPSHOTS ---
+                const botsQuery = await pool.query(
+                    `SELECT bot_id, config FROM bots WHERE user_id = $1 AND bot_type != 'SKIPPED'`,
+                    [record.user_id]
+                );
 
-                if (balance.total) {
-                    // 1. Identify assets with a balance > 0
-                    const assets = Object.keys(balance.total).filter(sym => balance.total[sym] > 0);
-
-                    if (assets.length > 0) {
-                        // 2. Fetch current prices for all these assets (against USDT)
-                        // Filter out 'USDT' itself from the ticker fetch list to avoid errors
-                        const symbolsToFetch = assets
-                            .filter(sym => sym !== 'USDT' && sym !== 'USDC')
-                            .map(sym => `${sym}/USDT`);
-
-                        let tickers = {};
-                        if (symbolsToFetch.length > 0) {
-                            try {
-                                tickers = await exchange.fetchTickers(symbolsToFetch);
-                            } catch (e) {
-                                console.error("Error fetching tickers:", e.message);
-                            }
-                        }
-
-                        // 3. Calculate Total Value
-                        assets.forEach(sym => {
-                            const qty = balance.total[sym];
-
-                            if (sym === 'USDT' || sym === 'USDC' || sym === 'DAI') {
-                                // Stablecoins count as $1 (approx)
-                                totalEquity += qty;
-                            } else if (tickers[`${sym}/USDT`]) {
-                                // Crypto assets: Quantity * Current Price
-                                totalEquity += qty * tickers[`${sym}/USDT`].last;
-                            }
-                        });
+                // Save Per-Bot Profit
+                for (const b of botsQuery.rows) {
+                    const cfg = typeof b.config === 'string' ? JSON.parse(b.config || '{}') : b.config;
+                    if ((cfg.mode || 'live') === mode) {
+                        const profit = parseFloat(cfg.total_profit || 0);
+                        // Save to bot_snapshots table
+                        await pool.query(
+                            `INSERT INTO bot_snapshots (bot_id, total_profit, recorded_at) VALUES ($1, $2, NOW())`,
+                            [b.bot_id, profit]
+                        );
                     }
                 }
 
-                // 4. Save to Database (Split Tables)
+                // --- B. SAVE PORTFOLIO EQUITY SNAPSHOTS (CCXT) ---
+                const apiKey = decrypt(record.api_key);
+                const apiSecret = decrypt(record.api_secret);
+                const passphrase = record.passphrase ? decrypt(record.passphrase) : undefined;
+                const exchangeId = record.exchange_name.replace('_paper', '').toLowerCase();
+
+                let totalEquity = 0;
+
+                if (ccxt[exchangeId]) {
+                    const exchange = new ccxt[exchangeId]({
+                        apiKey,
+                        secret: apiSecret,
+                        password: passphrase,
+                        enableRateLimit: true
+                    });
+
+                    if (record.exchange_name.includes('_paper')) {
+                        if (exchange.has['sandbox']) exchange.setSandboxMode(true);
+                    }
+
+                    const balance = await exchange.fetchBalance();
+                    if (balance.total) {
+                        const assets = Object.keys(balance.total).filter(sym => balance.total[sym] > 0);
+                        if (assets.length > 0) {
+                            const symbolsToFetch = assets
+                                .filter(sym => sym !== 'USDT' && sym !== 'USDC')
+                                .map(sym => `${sym}/USDT`);
+
+                            let tickers = {};
+                            if (symbolsToFetch.length > 0) {
+                                try { tickers = await exchange.fetchTickers(symbolsToFetch); } catch (e) { }
+                            }
+
+                            assets.forEach(sym => {
+                                const qty = balance.total[sym];
+                                if (sym === 'USDT' || sym === 'USDC' || sym === 'DAI') totalEquity += qty;
+                                else if (tickers[`${sym}/USDT`]) totalEquity += qty * tickers[`${sym}/USDT`].last;
+                            });
+                        }
+                    }
+                }
+
                 if (totalEquity > 0) {
                     const tableName = mode === 'live' ? 'portfolio_snapshots_live' : 'portfolio_snapshots_paper';
                     await pool.query(
-                        `INSERT INTO ${tableName} (user_id, total_value, recorded_at) 
-                         VALUES ($1, $2, NOW())`,
+                        `INSERT INTO ${tableName} (user_id, total_value, recorded_at) VALUES ($1, $2, NOW())`,
                         [record.user_id, totalEquity]
                     );
-                    console.log(`? [${mode.toUpperCase()}] Snapshot saved to ${tableName}: $${totalEquity.toFixed(2)}`);
+
+                    console.log(`✅ [${mode.toUpperCase()}] Snapshot saved for User ${record.user_id}. Equity: $${totalEquity.toFixed(2)}`);
                 }
 
             } catch (userErr) {
-                console.error(`? Failed snapshot for User ${record.user_id}: ${userErr.message}`);
+                console.error(`❌ Failed snapshot for User ${record.user_id}: ${userErr.message}`);
             }
         }
     } catch (err) {
-        console.error('? Snapshot Cron Error:', err.message);
+        console.error('❌ Snapshot Cron Error:', err.message);
     }
 });
 
-// --- HOURLY CLEANUP TASK ---
-// Deletes history older than 24h to keep DB light
-cron.schedule('0 * * * *', async () => {
-    try {
-        await pool.query("DELETE FROM portfolio_snapshots_live WHERE recorded_at < NOW() - INTERVAL '24 hours'");
-        await pool.query("DELETE FROM portfolio_snapshots_paper WHERE recorded_at < NOW() - INTERVAL '24 hours'");
-        console.log('?? Cleanup: Old snapshots removed from both tables.');
-    } catch (err) {
-        console.error('Cleanup Error:', err);
-    }
-});
+// Cleanup Task Removed (Data retained for historical analysis)
 
 // --- START SERVER ---
 const PORT = process.env.PORT || 5000;
