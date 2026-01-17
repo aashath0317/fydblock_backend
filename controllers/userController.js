@@ -440,15 +440,35 @@ const getUserBots = async (req, res) => {
             const cfg = typeof bot.config === 'string' ? JSON.parse(bot.config || '{}') : bot.config;
             return (cfg.mode || 'live') === mode;
         });
-        const enrichedBots = filteredBots.map(bot => {
+
+        // Enhance with Sparkline Data
+        const enrichedBots = await Promise.all(filteredBots.map(async (bot) => {
             let config = typeof bot.config === 'string' ? JSON.parse(bot.config || '{}') : bot.config;
+
+            // Fetch sparkline data
+            let sparkline = [];
+            try {
+                const sparkRes = await pool.query(
+                    `SELECT total_profit FROM bot_snapshots 
+                     WHERE bot_id = $1 
+                     ORDER BY recorded_at DESC 
+                     LIMIT 25`,
+                    [bot.bot_id]
+                );
+                sparkline = sparkRes.rows.map(r => parseFloat(r.total_profit)).reverse();
+            } catch (e) {
+                // If table doesn't exist or query fails, default empty
+            }
+
             return {
                 ...bot,
                 invested_capital: parseFloat(config.strategy?.investment || 0).toFixed(2),
                 total_profit: config.total_profit || (0).toFixed(2),
-                is_running: bot.status === 'running' || bot.status === 'active'
+                is_running: bot.status === 'running' || bot.status === 'active',
+                sparkline: sparkline
             };
-        });
+        }));
+
         res.json(enrichedBots);
     } catch (err) { console.error(err.message); res.status(500).send('Server Error'); }
 };
