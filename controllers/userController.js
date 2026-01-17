@@ -445,19 +445,28 @@ const getUserBots = async (req, res) => {
         const enrichedBots = await Promise.all(filteredBots.map(async (bot) => {
             let config = typeof bot.config === 'string' ? JSON.parse(bot.config || '{}') : bot.config;
 
-            // Fetch sparkline data
-            let sparkline = [];
+            // Fetch sparkline data & Holdings via Python API (SQLite)
+            // 2. Fetch Holdings (from Python Trading Engine / SQLite)
+            let holdings = { base: 0, quote: 0, free_base: 0, free_quote: 0, locked_base: 0, locked_quote: 0, reserve: 0 };
+
             try {
-                const sparkRes = await pool.query(
-                    `SELECT total_profit FROM bot_snapshots 
-                     WHERE bot_id = $1 
-                     ORDER BY recorded_at DESC 
-                     LIMIT 25`,
-                    [bot.bot_id]
-                );
-                sparkline = sparkRes.rows.map(r => parseFloat(r.total_profit)).reverse();
+                // Call Python Trading Engine API
+                const statsRes = await axios.get(`${TRADING_ENGINE_URL}/bot/${bot.bot_id}/stats`);
+                // console.log(`DEBUG: Bot ${bot.bot_id} Stats Response:`, JSON.stringify(statsRes.data));
+                if (statsRes.data) {
+                    // Sparkline
+                    sparkline = statsRes.data.sparkline || [];
+
+                    // Holdings from API
+                    if (statsRes.data.holdings) {
+                        holdings = statsRes.data.holdings;
+                        // Ensure reserve is explicitly mapped if missing (though direct assignment above usually works)
+                        if (holdings.reserve === undefined) holdings.reserve = 0;
+                    }
+                }
             } catch (e) {
-                // If table doesn't exist or query fails, default empty
+                // If API fails (e.g. bot not initialized in DB yet), default empty
+                console.error(`Error fetching stats for bot ${bot.bot_id}:`, e.message);
             }
 
             return {
@@ -465,7 +474,8 @@ const getUserBots = async (req, res) => {
                 invested_capital: parseFloat(config.strategy?.investment || 0).toFixed(2),
                 total_profit: config.total_profit || (0).toFixed(2),
                 is_running: bot.status === 'running' || bot.status === 'active',
-                sparkline: sparkline
+                sparkline: sparkline,
+                holdings: holdings // <--- FROM API
             };
         }));
 
