@@ -257,7 +257,7 @@ const createBot = async (req, res) => {
         const newBot = await pool.query(
             `INSERT INTO bots (user_id, exchange_connection_id, bot_name, quote_currency, bot_type, status, description, config, icon_url) 
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-            [req.user.id, exchangeId, bot_name || 'Grid Bot', quote_currency || 'USDT', bot_type, 'active', description, configStr, icon]
+            [req.user.id, exchangeId, bot_name || 'Grid Bot', quote_currency || 'USDT', bot_type, 'starting', description, configStr, icon]
         );
 
         // Start Engine
@@ -1175,19 +1175,46 @@ const getTopGainers = async (req, res) => {
     }
 };
 
+// --- Bot Status Sync (Python -> Node) ---
+const updateBotStatus = async (req, res) => {
+    const { bot_id, status } = req.body;
+    // console.log(`?? Received Status Update: Bot ${bot_id} -> ${status}`);
+    try {
+        if (!bot_id || !status) return res.status(400).json({ message: "Missing bot_id or status" });
+
+        await pool.query("UPDATE bots SET status = $1 WHERE bot_id = $2", [status, bot_id]);
+        res.json({ success: true });
+    } catch (e) {
+        console.error("Status Sync Error:", e.message);
+        res.status(500).json({ message: "Sync Failed" });
+    }
+};
+
 module.exports = {
-    getMe, updateProfile, addExchange, createBot, toggleBot, updateBot, deleteBot, getAvailableBots,
-    authExchange, authExchangeCallback, getDashboard, getPortfolio,
-    getUserBots, getMarketData, getMarketTickers, getMarketCandles, executeTradeSignal, recordBotTrade, runBacktest, getBacktests, saveBacktest, resumeActiveBots,
-    getBacktests,
-    saveBacktest,
-    runBacktest,
+    getMe,
+    updateProfile,
+    addExchange,
+    createBot,
+    toggleBot,
+    updateBot,
+    deleteBot,
+    getAvailableBots,
+    authExchange,
+    authExchangeCallback,
+    getDashboard,
+    getPortfolio,
+    getUserBots,
+    getMarketData,
+    getMarketTickers,
+    getMarketCandles,
     executeTradeSignal,
     recordBotTrade,
-    getSupportedExchanges,
-    recordBotTrade,
+    runBacktest,
+    getBacktests,
+    saveBacktest,
     getSupportedExchanges,
     getUserExchanges,
     deleteExchange,
-    getTopGainers // <--- EXPORTED
+    getTopGainers,
+    updateBotStatus
 };

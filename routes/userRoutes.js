@@ -27,7 +27,8 @@ const {
     executeTradeSignal, // Legacy signal handler
     recordBotTrade,      // <--- NEW: Receives trades FROM Python Engine
     getSupportedExchanges,
-    getTopGainers // <--- Imported
+    getTopGainers, // <--- Imported
+    updateBotStatus // <--- NEW: Status Sync
 } = require('../controllers/userController');
 
 const { protect } = require('../middleware/authMiddleware');
@@ -73,5 +74,6 @@ router.post('/backtest/run', protect, runBacktest); // Calls Python Backtester
 
 router.post('/bot-signal', executeTradeSignal); // Legacy/Signal Bot
 router.post('/bot-trade', recordBotTrade);      // <--- NEW: Engine Sync Route
+router.post('/bot-status', updateBotStatus);    // <--- NEW: Status Sync Route
 
 module.exports = router;
