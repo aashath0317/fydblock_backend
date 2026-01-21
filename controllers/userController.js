@@ -507,41 +507,48 @@ const getUserBots = async (req, res) => {
             let sparkline = [];
             let recent_trades = [];
 
+            // Call Python Trading Engine API
             try {
-                // Call Python Trading Engine API
                 const statsRes = await axios.get(`${TRADING_ENGINE_URL}/bot/${bot.bot_id}/stats`);
-                // console.log(`DEBUG: Bot ${bot.bot_id} Stats Response:`, JSON.stringify(statsRes.data));
                 if (statsRes.data) {
-                    // Sparkline
-                    sparkline = statsRes.data.sparkline || [];
-
                     // Holdings from API
                     if (statsRes.data.holdings) {
                         holdings = statsRes.data.holdings;
-                        // Ensure reserve is explicitly mapped if missing (though direct assignment above usually works)
                         if (holdings.reserve === undefined) holdings.reserve = 0;
                     }
-
                     // Open Orders from API
                     if (statsRes.data.open_orders) {
                         open_orders = statsRes.data.open_orders;
                     }
-
                     // Recent Trades from API
                     if (statsRes.data.recent_trades) {
                         recent_trades = statsRes.data.recent_trades;
                     }
                 }
             } catch (e) {
-                // If API fails (e.g. bot not initialized in DB yet), default empty
-                console.error(`Error fetching stats for bot ${bot.bot_id}:`, e.message);
+                // console.error(`Error fetching stats for bot ${bot.bot_id} from Engine:`, e.message);
+            }
+
+            // 3. [FIX] Always fetch Sparkline from DB for consistency
+            try {
+                const sparkRes = await pool.query(
+                    `SELECT total_profit FROM bot_snapshots 
+                         WHERE bot_id = $1 
+                         ORDER BY recorded_at DESC 
+                         LIMIT 25`,
+                    [bot.bot_id]
+                );
+                // Store as [oldest, ..., newest]
+                sparkline = sparkRes.rows.map(r => parseFloat(r.total_profit)).reverse();
+            } catch (e) {
+                console.error(`Error fetching sparkline for bot ${bot.bot_id}:`, e.message);
+                sparkline = [];
             }
 
             return {
                 ...bot,
                 invested_capital: parseFloat(config.strategy?.investment || 0).toFixed(2),
                 total_profit: config.total_profit || (0).toFixed(2),
-                is_running: bot.status === 'running' || bot.status === 'active',
                 is_running: bot.status === 'running' || bot.status === 'active',
                 sparkline: sparkline,
                 holdings: holdings,
