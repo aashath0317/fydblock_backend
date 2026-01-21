@@ -505,6 +505,7 @@ const getUserBots = async (req, res) => {
             let holdings = { base: 0, quote: 0, free_base: 0, free_quote: 0, locked_base: 0, locked_quote: 0, reserve: 0 };
             let open_orders = { buy: 0, sell: 0, total: 0 };
             let sparkline = [];
+            let recent_trades = [];
 
             try {
                 // Call Python Trading Engine API
@@ -525,6 +526,11 @@ const getUserBots = async (req, res) => {
                     if (statsRes.data.open_orders) {
                         open_orders = statsRes.data.open_orders;
                     }
+
+                    // Recent Trades from API
+                    if (statsRes.data.recent_trades) {
+                        recent_trades = statsRes.data.recent_trades;
+                    }
                 }
             } catch (e) {
                 // If API fails (e.g. bot not initialized in DB yet), default empty
@@ -536,9 +542,11 @@ const getUserBots = async (req, res) => {
                 invested_capital: parseFloat(config.strategy?.investment || 0).toFixed(2),
                 total_profit: config.total_profit || (0).toFixed(2),
                 is_running: bot.status === 'running' || bot.status === 'active',
+                is_running: bot.status === 'running' || bot.status === 'active',
                 sparkline: sparkline,
                 holdings: holdings,
-                open_orders: open_orders
+                open_orders: open_orders,
+                recent_trades: recent_trades
             };
         }));
 
