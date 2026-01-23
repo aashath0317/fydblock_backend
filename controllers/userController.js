@@ -3,6 +3,7 @@ const pool = require('../db');
 const axios = require('axios');
 const ccxt = require('ccxt');
 const { encrypt, decrypt } = require('../utils/encryption');
+const { getPublicExchange, getAuthenticatedExchange, invalidateUserExchange } = require('../utils/exchangeCache');
 
 // --- GLOBAL VARIABLES ---
 const TRADING_ENGINE_URL = process.env.TRADING_ENGINE_URL || 'http://localhost:8000';
@@ -144,6 +145,7 @@ const addExchange = async (req, res) => {
                 'UPDATE user_exchanges SET api_key = $1, api_secret = $2, passphrase = $3 WHERE user_id = $4 AND exchange_name = $5',
                 [encryptedKey, encryptedSecret, encryptedPassphrase, req.user.id, exchange_name]
             );
+            invalidateUserExchange(exchange_name, req.user.id);
             return res.json({ message: 'Exchange updated successfully' });
         }
 
@@ -187,6 +189,7 @@ const deleteExchange = async (req, res) => {
 
         // 4. Delete Exchange
         await client.query("DELETE FROM user_exchanges WHERE exchange_id = $1", [exchangeId]);
+        invalidateUserExchange(name, req.user.id);
 
         await client.query('COMMIT');
         res.json({ message: 'Exchange disconnected and associated bots removed.' });
@@ -793,15 +796,19 @@ const getPortfolio = async (req, res) => {
 
         if (!ccxt[exchangeId]) return res.status(400).json({ message: 'Exchange not supported' });
 
-        const exchange = new ccxt[exchangeId]({ apiKey, secret: apiSecret, password, enableRateLimit: true });
+        // Use cached exchange instance
+        const exchange = getAuthenticatedExchange({
+            exchangeId,
+            userId: req.user.id,
+            apiKey,
+            apiSecret,
+            password,
+            sandbox: mode === 'paper'
+        });
 
-        // --- FORCE SANDBOX FOR PAPER ---
-        if (mode === 'paper') {
-            if (exchange.has['sandbox']) {
-                exchange.setSandboxMode(true); // <--- This connects to OKX Demo
-            } else {
-                return res.json({ totalValue: 0, assets: [], error: "This exchange does not support Testnet via API." });
-            }
+        // Check if exchange supports sandbox (for error message)
+        if (mode === 'paper' && !exchange.has['sandbox'] && exchangeId !== 'okx') {
+            return res.json({ totalValue: 0, assets: [], error: "This exchange does not support Testnet via API." });
         }
 
         // 2. Fetch Real Balance
@@ -1004,8 +1011,8 @@ const getMarketData = async (req, res) => {
     const { exchange: exchangeId, symbol } = req.query;
     if (!exchangeId || !symbol) return res.status(400).json({ message: 'Missing parameters' });
     try {
-        if (!ccxt[exchangeId.toLowerCase()]) return res.status(400).json({ message: 'Exchange not supported' });
-        const exchange = new ccxt[exchangeId.toLowerCase()]();
+        // Use cached public exchange instance
+        const exchange = getPublicExchange(exchangeId);
         const orderBook = await exchange.fetchOrderBook(symbol, 10);
         res.json({ symbol, bids: orderBook.bids, asks: orderBook.asks, timestamp: Date.now() });
     } catch (err) { res.status(500).json({ message: 'Failed to fetch market data' }); }
@@ -1015,15 +1022,13 @@ const getMarketTickers = async (req, res) => {
     const { exchange: exchangeId, symbols } = req.query;
     if (!exchangeId || !symbols) return res.status(400).json({ message: 'Missing parameters' });
     try {
-        const parsedExId = exchangeId.toLowerCase();
-        if (!ccxt[parsedExId]) return res.status(400).json({ message: 'Exchange not supported' });
+        // Use cached public exchange instance
+        const exchange = getPublicExchange(exchangeId);
 
-        const exchange = new ccxt[parsedExId]({ enableRateLimit: true });
-        // Some exchanges require loadMarkets before fetchTickers
+        // loadMarkets is cached internally by CCXT after first call
         await exchange.loadMarkets();
 
         const symbolArray = symbols.split(',').map(s => s.trim().toUpperCase());
-        // Fetch tickers (ccxt usually supports passing list of symbols)
         const tickers = await exchange.fetchTickers(symbolArray);
 
         const result = [];
@@ -1033,7 +1038,7 @@ const getMarketTickers = async (req, res) => {
                 result.push({
                     symbol: sym,
                     lastPrice: data.last,
-                    percentage: data.percentage // 24h change %
+                    percentage: data.percentage
                 });
             }
         });
@@ -1183,41 +1188,26 @@ const getBacktests = async (req, res) => { res.json([]); };
 const saveBacktest = async (req, res) => { res.json({ message: "Saved" }); };
 
 const getTopGainers = async (req, res) => {
-    console.log("?? [TopGainers] Request received");
     try {
-        // Use Binance as default for global top gainers
-        const exchangeId = 'binance';
-        if (!ccxt[exchangeId]) {
-            console.log("?? [TopGainers] Binance not found in CCXT");
-            return res.json([]);
-        }
+        // Use cached public Binance instance
+        const exchange = getPublicExchange('binance');
 
-        console.log("?? [TopGainers] Initializing CCXT Binance...");
-        const exchange = new ccxt[exchangeId]({ enableRateLimit: true });
-
-        // Some exchanges require loadMarkets
-        // await exchange.loadMarkets(); // Binance usually doesn't 'require' it for public fetchTickers, but good practice.
-
-        console.log("?? [TopGainers] Fetching tickers...");
-        // Fetch all tickers
         const tickers = await exchange.fetchTickers();
-        console.log(`?? [TopGainers] Fetched ${Object.keys(tickers).length} tickers. Processing...`);
 
         // Filter valid USDT pairs and sort by percentage change
         const gainers = Object.values(tickers)
             .filter(t => t.symbol && t.symbol.endsWith('/USDT') && t.percentage !== undefined)
-            .sort((a, b) => b.percentage - a.percentage) // Descending
-            .slice(0, 5) // Top 5
+            .sort((a, b) => b.percentage - a.percentage)
+            .slice(0, 5)
             .map(t => ({
                 pair: t.symbol,
                 price: t.last,
                 change: t.percentage
             }));
 
-        console.log("?? [TopGainers] Sending response:", gainers);
         res.json(gainers);
     } catch (err) {
-        console.error("?? [TopGainers] ERROR:", err.message);
+        console.error("[TopGainers] ERROR:", err.message);
         res.status(500).json({ message: "Failed to fetch top gainers" });
     }
 };

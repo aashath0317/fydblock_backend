@@ -5,6 +5,7 @@ const cron = require('node-cron');
 const pool = require('./db');
 const ccxt = require('ccxt');
 const { decrypt } = require('./utils/encryption');
+const { getAuthenticatedExchange, clearAllCaches } = require('./utils/exchangeCache');
 
 // Load env vars
 // Load env vars
@@ -122,6 +123,8 @@ app.get('/', (req, res) => {
 // --- AUTOMATIC SNAPSHOT TASK (Cron Job) ---
 // Runs every hour
 cron.schedule('0 * * * *', async () => {
+    const memory = process.memoryUsage();
+    console.log(`[${new Date().toISOString()}] 📸 Memory Usage - RSS: ${(memory.rss / 1024 / 1024).toFixed(2)}MB, Heap: ${(memory.heapUsed / 1024 / 1024).toFixed(2)}MB`);
     console.log(`[${new Date().toISOString()}] 📸 Taking portfolio & profit snapshots...`);
 
     try {
@@ -167,16 +170,15 @@ cron.schedule('0 * * * *', async () => {
                 let totalEquity = 0;
 
                 if (ccxt[exchangeId]) {
-                    const exchange = new ccxt[exchangeId]({
+                    // Use cached exchange instance
+                    const exchange = getAuthenticatedExchange({
+                        exchangeId,
+                        userId: record.user_id,
                         apiKey,
-                        secret: apiSecret,
+                        apiSecret,
                         password: passphrase,
-                        enableRateLimit: true
+                        sandbox: record.exchange_name.includes('_paper')
                     });
-
-                    if (record.exchange_name.includes('_paper')) {
-                        if (exchange.has['sandbox']) exchange.setSandboxMode(true);
-                    }
 
                     const balance = await exchange.fetchBalance();
                     if (balance.total) {
@@ -224,7 +226,38 @@ cron.schedule('0 * * * *', async () => {
 // --- START SERVER ---
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () => {
-    console.log(`?? Server running on port ${PORT}`);
-    console.log(`?? Cron jobs scheduled.`);
+const server = app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`⏰ Cron jobs scheduled.`);
 });
+
+// --- GRACEFUL SHUTDOWN ---
+const gracefulShutdown = (signal) => {
+    console.log(`\n${signal} received. Shutting down gracefully...`);
+
+    // Clear exchange caches to free memory
+    clearAllCaches();
+
+    // Close log file
+    if (logFile) logFile.end();
+
+    // Close the server
+    server.close(() => {
+        console.log('HTTP server closed.');
+
+        // Close database pool
+        pool.end(() => {
+            console.log('Database pool closed.');
+            process.exit(0);
+        });
+    });
+
+    // Force close after 10 seconds
+    setTimeout(() => {
+        console.error('Forced shutdown after timeout.');
+        process.exit(1);
+    }, 10000);
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
