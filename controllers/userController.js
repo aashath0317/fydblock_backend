@@ -291,7 +291,16 @@ const createBot = async (req, res) => {
                     upper_price: parseFloat(strategy.upper_limit || strategy.upper_price || 0),
                     lower_price: parseFloat(strategy.lower_limit || strategy.lower_price || 0),
                     grids: parseInt(strategy.grid_count || strategy.grids || 10),
-                    spacing: (strategy.grid_type || "ARITHMETIC").toLowerCase() === 'geometric' ? 'geometric' : 'arithmetic'
+                    spacing: (strategy.grid_type || "ARITHMETIC").toLowerCase() === 'geometric' ? 'geometric' : 'arithmetic',
+                    // Infinity Grid Fields
+                    order_size_type: strategy.order_size_type || 'quote',
+                    amount_per_grid: parseFloat(strategy.amount_per_grid || 0),
+                    grid_gap: parseFloat(strategy.grid_gap || 0),
+                    grid_gap: parseFloat(strategy.grid_gap || 0),
+                    trailing_up: !!strategy.trailing_up,
+                    trailing_down: !!strategy.trailing_down,
+                    initial_base_balance_allocation: parseFloat(strategy.initial_base_balance_allocation || 0),
+                    initial_quote_balance_allocation: parseFloat(strategy.initial_quote_balance_allocation || 0)
                 }
             });
             console.log(`? Engine Started Bot ${newBot.rows[0].bot_id} in ${mode} mode`);
@@ -348,7 +357,13 @@ const toggleBot = async (req, res) => {
                             upper_price: parseFloat(strategy.upper_limit || strategy.upper_price || 0),
                             lower_price: parseFloat(strategy.lower_limit || strategy.lower_price || 0),
                             grids: parseInt(strategy.grid_count || strategy.grids || 10),
-                            spacing: (strategy.grid_type || "ARITHMETIC").toLowerCase() === 'geometric' ? 'geometric' : 'arithmetic'
+                            spacing: (strategy.grid_type || "ARITHMETIC").toLowerCase() === 'geometric' ? 'geometric' : 'arithmetic',
+                            // Infinity Grid Fields
+                            order_size_type: strategy.order_size_type || 'quote',
+                            amount_per_grid: parseFloat(strategy.amount_per_grid || 0),
+                            grid_gap: parseFloat(strategy.grid_gap || 0),
+                            trailing_up: !!strategy.trailing_up,
+                            trailing_down: !!strategy.trailing_down
                         }
                     });
                 } catch (e) { console.error("Engine Resume Error:", e.message); }
@@ -417,7 +432,13 @@ const updateBot = async (req, res) => {
                         upper_price: parseFloat(strategy.upper_limit || strategy.upper_price || 0),
                         lower_price: parseFloat(strategy.lower_limit || strategy.lower_price || 0),
                         grids: parseInt(strategy.grid_count || strategy.grids || 10),
-                        spacing: (strategy.grid_type || "ARITHMETIC").toLowerCase() === 'geometric' ? 'geometric' : 'arithmetic'
+                        spacing: (strategy.grid_type || "ARITHMETIC").toLowerCase() === 'geometric' ? 'geometric' : 'arithmetic',
+                        // Infinity Grid Fields
+                        order_size_type: strategy.order_size_type || 'quote',
+                        amount_per_grid: parseFloat(strategy.amount_per_grid || 0),
+                        grid_gap: parseFloat(strategy.grid_gap || 0),
+                        trailing_up: !!strategy.trailing_up,
+                        trailing_down: !!strategy.trailing_down
                     }
                 });
             }
@@ -1132,11 +1153,22 @@ const runBacktest = async (req, res) => {
 // --- Proxy to Python Engine for Candles ---
 const getMarketCandles = async (req, res) => {
     try {
-        const { symbol, exchange, timeframe, limit } = req.query;
+        let { symbol, exchange, timeframe, limit, interval, from: fromParam } = req.query;
         // console.log("Fetching candles via Proxy:", req.query);
 
+        // Map 'interval' to 'timeframe' if timeframe is missing (Frontend sends 'interval')
+        if (!timeframe && interval) {
+            timeframe = interval;
+        }
+
+        // Convert 'from' (seconds) to 'since' (ms) for CCXT
+        let since = undefined;
+        if (fromParam) {
+            since = parseInt(fromParam) * 1000;
+        }
+
         const response = await axios.get(`${TRADING_ENGINE_URL}/market/candles`, {
-            params: { symbol, exchange, timeframe, limit }
+            params: { symbol, exchange, timeframe, limit, since }
         });
 
         res.json(response.data);
