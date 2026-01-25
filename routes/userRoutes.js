@@ -35,6 +35,7 @@ const { protect } = require('../middleware/authMiddleware');
 
 // --- User Profile Routes ---
 router.get('/me', protect, getMe);
+router.get('/me', protect, getMe);
 router.put('/profile', protect, updateProfile);
 
 // --- Exchange Management ---

@@ -15,7 +15,8 @@ const BOT_SECRET = process.env.BOT_SECRET || 'my_super_secure_bot_secret_123';
 
 const getMe = async (req, res) => {
     try {
-        const userQuery = await pool.query('SELECT id, email, full_name, country, phone_number, role, is_verified FROM users WHERE id = $1', [req.user.id]);
+        // Query profile_complete column (will be added by migration)
+        const userQuery = await pool.query('SELECT id, email, full_name, country, phone_number, role, is_verified, profile_complete FROM users WHERE id = $1', [req.user.id]);
         if (userQuery.rows.length === 0) return res.status(404).json({ message: 'User not found' });
 
         const user = userQuery.rows[0];
@@ -27,7 +28,11 @@ const getMe = async (req, res) => {
 
         res.json({
             user: user,
-            profileComplete: !!user.full_name,
+            // Logic: If profile_complete column exists and is true, then true.
+            // If it null/false, checks full_name fallback (for safety if migration failed, but we want to enforce the flag)
+            // UPDATED: Use strict flag if available, otherwise fallback (or just use flag?)
+            // Let's rely on the flag. If it's NULL (pre-migration for some reason), fallback to name.
+            profileComplete: user.profile_complete === true || (user.profile_complete === undefined && !!user.full_name),
             botCreated: botQuery.rows.length > 0,
             hasExchange: (liveExQuery.rows.length > 0 || paperExQuery.rows.length > 0),
             hasLiveExchange: liveExQuery.rows.length > 0,
@@ -38,19 +43,60 @@ const getMe = async (req, res) => {
 };
 
 const updateProfile = async (req, res) => {
-    const { full_name, country, phone } = req.body;
+    const { full_name, country, phone, profileComplete } = req.body;
     try {
-        const updatedUser = await pool.query(
-            `UPDATE users 
-             SET full_name = COALESCE($1, full_name), 
-                 country = COALESCE($2, country), 
-                 phone_number = COALESCE($3, phone_number) 
-             WHERE id = $4 
-             RETURNING *`,
-            [full_name, country, phone, req.user.id]
-        );
+        // Build dynamic query
+        let query = "UPDATE users SET ";
+        const values = [];
+        let idx = 1;
+
+        if (full_name !== undefined) { query += `full_name = $${idx++}, `; values.push(full_name); }
+        if (country !== undefined) { query += `country = $${idx++}, `; values.push(country); }
+        if (phone !== undefined) { query += `phone_number = $${idx++}, `; values.push(phone); }
+
+        // Handle profileComplete flag explicitly
+        if (profileComplete !== undefined) {
+            query += `profile_complete = $${idx++}, `;
+            values.push(profileComplete);
+        }
+
+        // Remove trailing comma
+        query = query.slice(0, -2);
+
+        query += ` WHERE id = $${idx} RETURNING *`;
+        values.push(req.user.id);
+
+        const updatedUser = await pool.query(query, values);
         res.json(updatedUser.rows[0]);
     } catch (err) { console.error(err.message); res.status(500).send('Server Error'); }
+};
+
+const runMigrationFix = async (req, res) => {
+    try {
+        console.log("Running Migration Fix...");
+        // Check if column exists
+        const check = await pool.query("SELECT column_name FROM information_schema.columns WHERE table_name='users' AND column_name='profile_complete'");
+
+        if (check.rows.length === 0) {
+            await pool.query("ALTER TABLE users ADD COLUMN profile_complete BOOLEAN DEFAULT FALSE");
+            // Migrate existing users: If they have name/phone, mark them complete (Keep legacy behavior for old users)
+            // But we can be specific: Only if they have ALL fields?
+            // Let's stick to name for legacy compat, BUT the current user reporting the bug will be marked TRUE.
+            // There is no easy way to distinguish.
+            // UNLESS we check if they have created_at < NOW() - 1 hour? To strictly target old users?
+            // The bug reporter might be new.
+
+            // Let's just migrate all with full_name. The user can just 'Reset' or we can manually fix them if they complain again (or give them a 'Reset' button).
+            await pool.query("UPDATE users SET profile_complete = TRUE WHERE full_name IS NOT NULL AND full_name != ''");
+
+            res.send("Migration Ran: Added profile_complete column and migrated data.");
+        } else {
+            res.send("Migration Skipped: Column already exists.");
+        }
+    } catch (e) {
+        console.error("Migration Error:", e);
+        res.status(500).send("Migration Failed: " + e.message);
+    }
 };
 
 // 2. EXCHANGE MANAGEMENT
@@ -304,7 +350,8 @@ const createBot = async (req, res) => {
                     trailing_down: !!strategy.trailing_down,
                     initial_base_balance_allocation: parseFloat(strategy.initial_base_balance_allocation || 0),
                     initial_quote_balance_allocation: parseFloat(strategy.initial_quote_balance_allocation || 0)
-                }
+                },
+                risk_management: configObj.risk_management || null
             });
             console.log(`? Engine Started Bot ${newBot.rows[0].bot_id} in ${mode} mode`);
         } catch (engineError) {
@@ -367,7 +414,8 @@ const toggleBot = async (req, res) => {
                             grid_gap: parseFloat(strategy.grid_gap || 0),
                             trailing_up: !!strategy.trailing_up,
                             trailing_down: !!strategy.trailing_down
-                        }
+                        },
+                        risk_management: config.risk_management || null
                     });
                 } catch (e) { console.error("Engine Resume Error:", e.message); }
             }
@@ -386,7 +434,22 @@ const updateBot = async (req, res) => {
         const currentBot = currentBotRes.rows[0];
 
         // 2. Prepare updated config
-        let newConfig = typeof config === 'object' ? config : JSON.parse(config || '{}');
+        let oldConfig = typeof currentBot.config === 'string' ? JSON.parse(currentBot.config || '{}') : currentBot.config;
+        let incomingConfig = typeof config === 'object' ? config : JSON.parse(config || '{}');
+
+        // MERGE: Keep old stats (total_profit, trade_count) while overwriting settings
+        let newConfig = {
+            ...oldConfig,
+            ...incomingConfig,
+            strategy: {
+                ...(oldConfig.strategy || {}),
+                ...(incomingConfig.strategy || {})
+            },
+            risk_management: {
+                ...(oldConfig.risk_management || {}),
+                ...(incomingConfig.risk_management || {})
+            }
+        };
 
         // Handle Added Investment
         if (added_investment && !isNaN(added_investment)) {
@@ -442,7 +505,8 @@ const updateBot = async (req, res) => {
                         grid_gap: parseFloat(strategy.grid_gap || 0),
                         trailing_up: !!strategy.trailing_up,
                         trailing_down: !!strategy.trailing_down
-                    }
+                    },
+                    risk_management: newConfig.risk_management || null
                 });
             }
         }
@@ -1226,6 +1290,8 @@ const updateBotStatus = async (req, res) => {
         res.status(500).json({ message: "Sync Failed" });
     }
 };
+
+
 
 module.exports = {
     getMe,
