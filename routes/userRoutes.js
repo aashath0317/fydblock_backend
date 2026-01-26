@@ -1,5 +1,27 @@
-// backend/routes/userRoutes.js
 const router = require('express').Router();
+const multer = require('multer');
+const path = require('path');
+
+// Configure Multer
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, 'public/uploads');
+    },
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        cb(null, 'user-' + req.user.id + '-' + uniqueSuffix + path.extname(file.originalname));
+    }
+});
+const upload = multer({
+    storage: storage,
+    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+    fileFilter: (req, file, cb) => {
+        if (!file.mimetype.startsWith('image/')) {
+            return cb(new Error('Only image files are allowed!'), false);
+        }
+        cb(null, true);
+    }
+});
 
 // Import all controllers
 const {
@@ -30,15 +52,18 @@ const {
     getTopGainers, // <--- Imported
     updateBotStatus, // <--- NEW: Status Sync
     getDailyStats,
-    getMarketCoins
+    getMarketCoins,
+    uploadAvatar // <--- NEW
 } = require('../controllers/userController');
 
 const { protect } = require('../middleware/authMiddleware');
+const { changePassword } = require('../controllers/authController');
 
 // --- User Profile Routes ---
 router.get('/me', protect, getMe);
-router.get('/me', protect, getMe);
 router.put('/profile', protect, updateProfile);
+router.post('/change-password', protect, changePassword);
+router.post('/profile/avatar', protect, upload.single('avatar'), uploadAvatar);
 
 // --- Exchange Management ---
 router.post('/exchange', protect, addExchange);

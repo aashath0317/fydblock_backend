@@ -13,6 +13,10 @@ CREATE TABLE users (
     reset_password_token VARCHAR(255),
     reset_password_expires BIGINT,
     referred_by INTEGER REFERENCES users(id), -- Added for Affiliate System
+    language VARCHAR(10) DEFAULT 'en',
+    timezone VARCHAR(50) DEFAULT 'UTC',
+    avatar_url TEXT,
+    preferences JSONB DEFAULT '{}',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

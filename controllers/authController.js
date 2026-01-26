@@ -427,4 +427,41 @@ const resendVerificationCode = async (req, res) => {
     }
 };
 
-module.exports = { register, login, googleAuth, forgotPassword, resetPassword, verifyEmail, resendVerificationCode };
+// 8. CHANGE PASSWORD (LOGGED IN)
+const changePassword = async (req, res) => {
+    const { oldPassword, newPassword } = req.body;
+    const userId = req.user.id;
+
+    try {
+        // 1. Get user
+        const user = await pool.query('SELECT password FROM users WHERE id = $1', [userId]);
+        if (user.rows.length === 0) return res.status(404).json({ message: 'User not found' });
+
+        // 2. Verify old password
+        // If user has no password (e.g. Google Auth), we might want to allow setting one if they specifically used a "Set Password" flow,
+        // but here we assume standard change flow which requires knowing the old one.
+        if (!user.rows[0].password) {
+            return res.status(400).json({ message: 'You are logged in via social provider and do not have a password set.' });
+        }
+
+        const isMatch = await bcrypt.compare(oldPassword, user.rows[0].password);
+        if (!isMatch) {
+            return res.status(400).json({ message: 'Current password is incorrect' });
+        }
+
+        // 3. Hash new password
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(newPassword, salt);
+
+        // 4. Update
+        await pool.query('UPDATE users SET password = $1 WHERE id = $2', [hashedPassword, userId]);
+
+        res.json({ message: 'Password changed successfully' });
+
+    } catch (err) {
+        console.error("Change Password Error:", err.message);
+        res.status(500).send('Server Error');
+    }
+};
+
+module.exports = { register, login, googleAuth, forgotPassword, resetPassword, verifyEmail, resendVerificationCode, changePassword };

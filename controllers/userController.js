@@ -16,7 +16,7 @@ const BOT_SECRET = process.env.BOT_SECRET || 'my_super_secure_bot_secret_123';
 const getMe = async (req, res) => {
     try {
         // Query profile_complete column (will be added by migration)
-        const userQuery = await pool.query('SELECT id, email, full_name, country, phone_number, role, is_verified, profile_complete FROM users WHERE id = $1', [req.user.id]);
+        const userQuery = await pool.query('SELECT id, email, full_name, country, phone_number, role, is_verified, profile_complete, language, timezone, avatar_url, preferences FROM users WHERE id = $1', [req.user.id]);
         if (userQuery.rows.length === 0) return res.status(404).json({ message: 'User not found' });
 
         const user = userQuery.rows[0];
@@ -37,7 +37,11 @@ const getMe = async (req, res) => {
             hasExchange: (liveExQuery.rows.length > 0 || paperExQuery.rows.length > 0),
             hasLiveExchange: liveExQuery.rows.length > 0,
             hasPaperExchange: paperExQuery.rows.length > 0,
-            is_verified: user.is_verified // New field
+            is_verified: user.is_verified, // New field
+            language: user.language,
+            timezone: user.timezone,
+            avatar_url: user.avatar_url,
+            preferences: user.preferences
         });
     } catch (err) { console.error(err.message); res.status(500).send('Server Error'); }
 };
@@ -60,6 +64,15 @@ const updateProfile = async (req, res) => {
             values.push(profileComplete);
         }
 
+        // New Fields
+        if (req.body.language !== undefined) { query += `language = $${idx++}, `; values.push(req.body.language); }
+        if (req.body.timezone !== undefined) { query += `timezone = $${idx++}, `; values.push(req.body.timezone); }
+        if (req.body.avatar_url !== undefined) { query += `avatar_url = $${idx++}, `; values.push(req.body.avatar_url); }
+        if (req.body.preferences !== undefined) {
+            query += `preferences = $${idx++}, `;
+            values.push(req.body.preferences);
+        }
+
         // Remove trailing comma
         query = query.slice(0, -2);
 
@@ -69,6 +82,23 @@ const updateProfile = async (req, res) => {
         const updatedUser = await pool.query(query, values);
         res.json(updatedUser.rows[0]);
     } catch (err) { console.error(err.message); res.status(500).send('Server Error'); }
+};
+
+const uploadAvatar = async (req, res) => {
+    try {
+        if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
+
+        // Construct URL
+        const avatarUrl = `${process.env.BACKEND_URL || 'http://localhost:5000'}/uploads/${req.file.filename}`;
+
+        // Update DB
+        await pool.query('UPDATE users SET avatar_url = $1 WHERE id = $2', [avatarUrl, req.user.id]);
+
+        res.json({ avatar_url: avatarUrl, message: 'Avatar uploaded successfully' });
+    } catch (err) {
+        console.error("Avatar Upload Error:", err.message);
+        res.status(500).send('Server Error');
+    }
 };
 
 const runMigrationFix = async (req, res) => {
@@ -1554,5 +1584,6 @@ module.exports = {
     getTopGainers,
     updateBotStatus,
     getDailyStats,
-    getMarketCoins
+    getMarketCoins,
+    uploadAvatar
 };
