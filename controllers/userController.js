@@ -101,6 +101,33 @@ const uploadAvatar = async (req, res) => {
     }
 };
 
+const getActiveSessions = async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT id, ip_address, user_agent, device_type, browser, os, location, last_active, created_at FROM user_sessions WHERE user_id = $1 AND is_active = TRUE ORDER BY last_active DESC',
+            [req.user.id]
+        );
+        res.json(result.rows);
+    } catch (err) {
+        console.error("Fetch Sessions Error:", err.message);
+        res.status(500).send('Server Error');
+    }
+};
+
+const revokeSession = async (req, res) => {
+    const { id } = req.params;
+    try {
+        await pool.query(
+            'UPDATE user_sessions SET is_active = FALSE WHERE id = $1 AND user_id = $2',
+            [id, req.user.id]
+        );
+        res.json({ message: 'Session revoked successfully' });
+    } catch (err) {
+        console.error("Revoke Session Error:", err.message);
+        res.status(500).send('Server Error');
+    }
+};
+
 const runMigrationFix = async (req, res) => {
     try {
         console.log("Running Migration Fix...");
@@ -1585,5 +1612,7 @@ module.exports = {
     updateBotStatus,
     getDailyStats,
     getMarketCoins,
-    uploadAvatar
+    uploadAvatar,
+    getActiveSessions,
+    revokeSession
 };

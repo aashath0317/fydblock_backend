@@ -53,7 +53,9 @@ const {
     updateBotStatus, // <--- NEW: Status Sync
     getDailyStats,
     getMarketCoins,
-    uploadAvatar // <--- NEW
+    uploadAvatar, // <--- NEW
+    getActiveSessions, // <--- NEW
+    revokeSession // <--- NEW
 } = require('../controllers/userController');
 
 const { protect } = require('../middleware/authMiddleware');
@@ -64,6 +66,8 @@ router.get('/me', protect, getMe);
 router.put('/profile', protect, updateProfile);
 router.post('/change-password', protect, changePassword);
 router.post('/profile/avatar', protect, upload.single('avatar'), uploadAvatar);
+router.get('/sessions', protect, getActiveSessions); // <--- NEW
+router.delete('/sessions/:id', protect, revokeSession); // <--- NEW
 
 // --- Exchange Management ---
 router.post('/exchange', protect, addExchange);

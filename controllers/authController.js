@@ -28,6 +28,41 @@ const generateUniqueSlug = async (baseName) => {
     return finalSlug;
 };
 
+// --- SESSION LOGGING HELPER ---
+const logSession = async (req, userId) => {
+    try {
+        const userAgent = req.headers['user-agent'] || 'Unknown';
+        const ipAddress = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'Unknown';
+        const sessionId = crypto.randomBytes(16).toString('hex');
+
+        // Simple UA Parsing
+        let browser = 'Unknown';
+        let os = 'Unknown';
+        let deviceType = 'Desktop';
+
+        if (userAgent.includes('Firefox')) browser = 'Firefox';
+        else if (userAgent.includes('Chrome')) browser = 'Chrome';
+        else if (userAgent.includes('Safari')) browser = 'Safari';
+        else if (userAgent.includes('Edge')) browser = 'Edge';
+
+        if (userAgent.includes('Windows')) os = 'Windows';
+        else if (userAgent.includes('Macintosh')) os = 'macOS';
+        else if (userAgent.includes('Linux')) os = 'Linux';
+        else if (userAgent.includes('Android')) { os = 'Android'; deviceType = 'Mobile'; }
+        else if (userAgent.includes('iPhone') || userAgent.includes('iPad')) { os = 'iOS'; deviceType = 'Mobile'; }
+
+        const sessionRes = await pool.query(
+            `INSERT INTO user_sessions (user_id, session_id, ip_address, user_agent, device_type, browser, os, last_active) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP) RETURNING id`,
+            [userId, sessionId, ipAddress, userAgent, deviceType, browser, os]
+        );
+        return sessionRes.rows[0].id;
+    } catch (err) {
+        console.error("Session Log Error:", err.message);
+        return null;
+    }
+};
+
 // 1. REGISTER USER
 const register = async (req, res) => {
     const { email, password, first_name, last_name, referral_code } = req.body;
@@ -103,8 +138,12 @@ const register = async (req, res) => {
             console.error('[Register] Failed to send verification email:', emailErr.message);
         }
 
+        // Log session
+        const sessionDbId = await logSession(req, newUser.rows[0].id);
+
         res.json({
             token,
+            sessionId: sessionDbId,
             user: {
                 id: newUser.rows[0].id,
                 email: newUser.rows[0].email,
@@ -160,9 +199,13 @@ const login = async (req, res) => {
             }
         }
 
+        // Log session
+        const sessionDbId = await logSession(req, user.rows[0].id);
+
         // ? CRITICAL FIX: Send 'role' and 'is_verified' in the response
         res.json({
             token,
+            sessionId: sessionDbId, // <--- NEW
             user: {
                 id: user.rows[0].id,
                 email: user.rows[0].email,
@@ -240,10 +283,14 @@ const googleAuth = async (req, res) => {
             userId = newUser.rows[0].id;
         }
 
+        // Log session
+        const sessionDbId = await logSession(req, userId);
+
         const appToken = jwt.sign({ id: userId }, process.env.JWT_SECRET, { expiresIn: '1h' });
 
         res.json({
             token: appToken,
+            sessionId: sessionDbId, // <--- NEW
             user: {
                 id: userId,
                 email,
