@@ -322,11 +322,31 @@ const getPaymentFailedEmailHtml = (name) => {
   return getBaseEmailHtml(content);
 };
 
+
+// 7. Password Reset Request
+const getPasswordResetEmailHtml = (resetUrl) => {
+  const content = `
+      <h1>Password Reset Request</h1>
+      <p>You have requested to reset your password.</p>
+      
+      <p>Please click the button below to set a new password:</p>
+      
+      <a href="${resetUrl}" class="btn">Reset Password</a>
+      
+      <p>If the button doesn't work, you can copy and paste this link into your browser:</p>
+      <p style="word-break: break-all; font-size: 12px; color: #888;">${resetUrl}</p>
+      
+      <p>If you didn't request this, you can safely ignore this email. Your password will remain unchanged.</p>
+    `;
+  return getBaseEmailHtml(content);
+};
+
 module.exports = {
   getWelcomeEmailHtml,
   getNewLoginEmailHtml,
   getApiConnectionLostEmailHtml,
   getTargetReachedEmailHtml,
   getPaymentConfirmedEmailHtml,
-  getPaymentFailedEmailHtml
+  getPaymentFailedEmailHtml,
+  getPasswordResetEmailHtml
 };

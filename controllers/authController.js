@@ -3,7 +3,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const sendEmail = require('../utils/sendEmail');
-const { getWelcomeEmailHtml } = require('../utils/emailTemplates');
+const { getWelcomeEmailHtml, getPasswordResetEmailHtml } = require('../utils/emailTemplates');
 
 const { OAuth2Client } = require('google-auth-library');
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
@@ -296,12 +296,9 @@ const forgotPassword = async (req, res) => {
         const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
         const resetUrl = `${frontendUrl}/reset-password/${resetToken}`;
 
-        const message = `
-            <h1>You have requested a password reset</h1>
-            <p>Please go to this link to reset your password:</p>
-            <a href="${resetUrl}" clicktracking=off>${resetUrl}</a>
-            <p>If you didn't request this, please ignore this email.</p>
-        `;
+
+        const message = getPasswordResetEmailHtml(resetUrl);
+
 
         try {
             await sendEmail({
