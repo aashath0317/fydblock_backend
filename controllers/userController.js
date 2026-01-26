@@ -667,18 +667,75 @@ const getDashboard = async (req, res) => {
         });
 
 
-        // 2. Calculate Bot Stats (Current Totals) & Fetch Sparklines
+        // 2. Calculate Dashboard Stats
+        // A. Total Bot Profit (All time)
+        // B. Today's Profit (Rolling 24h or Since Midnight)
+        // C. Assets Value
+
         let totalBotProfit = 0;
         let activeInvestment = 0;
+        let todayProfit = 0;
 
-        // Use Promise.all to fetch sparklines in parallel
+        // Use Promise.all to fetch stats in parallel
         await Promise.all(filteredBots.map(async (bot) => {
             let config = typeof bot.config === 'string' ? JSON.parse(bot.config) : bot.config;
-            totalBotProfit += parseFloat(config.total_profit || 0);
+            const currentCmlProfit = parseFloat(config.total_profit || 0);
+
+            totalBotProfit += currentCmlProfit;
             activeInvestment += parseFloat(config.strategy?.investment || 0);
 
-            // Fetch last 25 snapshots for this bot for the sparkline (24h + current)
+            // Fetch snapshot ~24h ago to calc change
             try {
+                const snapshotRes = await pool.query(
+                    `SELECT total_profit FROM bot_snapshots 
+                     WHERE bot_id = $1 
+                       AND recorded_at >= NOW() - INTERVAL '24 hours'
+                     ORDER BY recorded_at ASC 
+                     LIMIT 1`,
+                    [bot.bot_id]
+                );
+
+                let profit24hAgo = 0;
+                if (snapshotRes.rows.length > 0) {
+                    profit24hAgo = parseFloat(snapshotRes.rows[0].total_profit);
+                } else {
+                    // If no snapshot in last 24h, check if bot is newer than 24h
+                    const botCreation = new Date(bot.created_at);
+                    if (botCreation >= new Date(Date.now() - 24 * 60 * 60 * 1000)) {
+                        profit24hAgo = 0; // Created today, so start profit was 0
+                    } else {
+                        // Created long ago but no snapshot in 24h? 
+                        // It means no trade happened, or engine offline. 
+                        // Assume profit didn't change (use current), OR assume 0 change.
+                        // Ideally we find the *latest* snapshot BEFORE 24h.
+                        // For simplicity, let's assume if no record in last 24h, we look for ONE record BEFORE 24h.
+                        const olderSnapshot = await pool.query(
+                            `SELECT total_profit FROM bot_snapshots 
+                              WHERE bot_id = $1 AND recorded_at < NOW() - INTERVAL '24 hours'
+                              ORDER BY recorded_at DESC LIMIT 1`,
+                            [bot.bot_id]
+                        );
+                        if (olderSnapshot.rows.length > 0) {
+                            profit24hAgo = parseFloat(olderSnapshot.rows[0].total_profit);
+                        } else {
+                            // No snapshots ever?
+                            profit24hAgo = 0;
+                        }
+                        // Actually if we assume no activity means no change, 
+                        // then todayProfit (delta) should be 0. 
+                        // If we set profit24hAgo = currentCmlProfit, delta is 0.
+                        // Let's refine:
+                        if (snapshotRes.rows.length === 0 && olderSnapshot.rows.length > 0) {
+                            // No activity in last 24h, profit24hAgo is the last known profit
+                            profit24hAgo = parseFloat(olderSnapshot.rows[0].total_profit);
+                        }
+                    }
+                }
+
+                // If profit24hAgo > current (rare, loss?), result is negative.
+                todayProfit += (currentCmlProfit - profit24hAgo);
+
+                // Fetch Sparkline (Optimization: Re-use query? No, limit and order usage differ slightly)
                 const sparkRes = await pool.query(
                     `SELECT total_profit FROM bot_snapshots 
                      WHERE bot_id = $1 
@@ -686,8 +743,8 @@ const getDashboard = async (req, res) => {
                      LIMIT 25`,
                     [bot.bot_id]
                 );
-                // Store as [oldest, ..., newest]
                 bot.sparkline = sparkRes.rows.map(r => parseFloat(r.total_profit)).reverse();
+
             } catch (e) {
                 bot.sparkline = [];
             }
@@ -757,7 +814,6 @@ const getDashboard = async (req, res) => {
         // Ensure we don't exceed 31 points (as requested "remove old snapshot of 1st one")
         // though logic above roughly yields 30.
         const finalChartData = chartData.slice(-31);
-
 
         // 4. Calculate Portfolio Stats (Assets Value & 30d PnL)
         // This comes from portfolio_snapshots (Equity)
@@ -1033,6 +1089,41 @@ const getPortfolio = async (req, res) => {
 
         const changePercent = totalPreviousValue > 0 ? ((totalValue - totalPreviousValue) / totalPreviousValue) * 100 : 0;
 
+        // 4. Fetch Sparkline History (OHLCV) for Assets
+        // Limit to top 20 assets to prevent rate limits/timeouts
+        const topAssets = enrichedAssets.sort((a, b) => b.value - a.value).slice(0, 20);
+        const otherAssets = enrichedAssets.sort((a, b) => b.value - a.value).slice(20);
+
+        await Promise.all(topAssets.map(async (asset) => {
+            try {
+                // Skip stablecoins if you want, but user might want to see stable chart (usually flat)
+                const symbol = asset.symbol.toUpperCase();
+                let pair = `${symbol}/USDT`;
+
+                // Handle stablecoins or weird pairs?
+                if (['USDT', 'USDC', 'BUSD', 'DAI'].includes(symbol)) {
+                    // Stables history is just flat 1.0 (optimize)
+                    asset.history = Array(24).fill(1.0);
+                    return;
+                }
+
+                // Fetch last 24 1h candles
+                // Limit 24
+                const ohlcv = await exchange.fetchOHLCV(pair, '1h', undefined, 24);
+                // Map to close price (index 4)
+                asset.history = ohlcv.map(c => c[4]);
+            } catch (e) {
+                // If pair doesn't exist or error, empty history
+                asset.history = [];
+                // console.log(`Failed to fetch history for ${asset.symbol}: ${e.message}`);
+            }
+        }));
+
+        // Fill others with empty
+        otherAssets.forEach(a => a.history = []);
+
+        const finalAssets = [...topAssets, ...otherAssets].sort((a, b) => b.value - a.value);
+
         // 4. Get History (Real Only)
         let historyData = [];
         try {
@@ -1055,7 +1146,7 @@ const getPortfolio = async (req, res) => {
         res.json({
             totalValue,
             changePercent: parseFloat(changePercent.toFixed(2)),
-            assets: enrichedAssets.sort((a, b) => b.value - a.value),
+            assets: finalAssets,
             history: historyData,
             isSimulated: false, // Explicitly tell frontend this is REAL data
             mode: mode
@@ -1063,6 +1154,78 @@ const getPortfolio = async (req, res) => {
 
     } catch (err) {
         console.error("Portfolio Error:", err);
+        res.status(500).send('Server Error');
+    }
+};
+const getDailyStats = async (req, res) => {
+    const { mode = 'live' } = req.query;
+    try {
+        const botsQuery = await pool.query(`
+            SELECT b.bot_id, b.config, b.created_at
+            FROM bots b
+            WHERE b.user_id = $1 AND b.bot_type != 'SKIPPED'
+        `, [req.user.id]);
+
+        const filteredBots = botsQuery.rows.filter(bot => {
+            const cfg = typeof bot.config === 'string' ? JSON.parse(bot.config || '{}') : bot.config;
+            return (cfg.mode || 'live') === mode;
+        });
+
+        let totalBotProfit = 0;
+        let todayProfit = 0;
+        let activeInvestment = 0;
+
+        await Promise.all(filteredBots.map(async (bot) => {
+            let config = typeof bot.config === 'string' ? JSON.parse(bot.config) : bot.config;
+            const currentCmlProfit = parseFloat(config.total_profit || 0);
+            totalBotProfit += currentCmlProfit;
+            activeInvestment += parseFloat(config.strategy?.investment || 0);
+
+            try {
+                // Fetch snapshot ~24h ago
+                const snapshotRes = await pool.query(
+                    `SELECT total_profit FROM bot_snapshots 
+                     WHERE bot_id = $1 
+                       AND recorded_at >= NOW() - INTERVAL '24 hours'
+                     ORDER BY recorded_at ASC 
+                     LIMIT 1`,
+                    [bot.bot_id]
+                );
+
+                let profit24hAgo = 0;
+                if (snapshotRes.rows.length > 0) {
+                    profit24hAgo = parseFloat(snapshotRes.rows[0].total_profit);
+                } else {
+                    const botCreation = new Date(bot.created_at);
+                    if (botCreation >= new Date(Date.now() - 24 * 60 * 60 * 1000)) {
+                        profit24hAgo = 0;
+                    } else {
+                        // Attempt to find older
+                        const olderSnapshot = await pool.query(
+                            `SELECT total_profit FROM bot_snapshots 
+                              WHERE bot_id = $1 AND recorded_at < NOW() - INTERVAL '24 hours'
+                              ORDER BY recorded_at DESC LIMIT 1`,
+                            [bot.bot_id]
+                        );
+                        if (olderSnapshot.rows.length > 0) {
+                            profit24hAgo = parseFloat(olderSnapshot.rows[0].total_profit);
+                        }
+                    }
+                }
+                todayProfit += (currentCmlProfit - profit24hAgo);
+            } catch (e) { }
+        }));
+
+        res.json({
+            todayProfit: todayProfit,
+            todayProfitFormatted: `$${todayProfit.toFixed(2)}`,
+            todayYield: activeInvestment > 0 ? ((todayProfit / activeInvestment) * 100).toFixed(2) : "0.00",
+            activeInvestment: activeInvestment,
+            totalBotProfit: totalBotProfit
+        });
+
+    } catch (err) {
+        console.error(err.message);
         res.status(500).send('Server Error');
     }
 };
@@ -1276,6 +1439,76 @@ const getTopGainers = async (req, res) => {
     }
 };
 
+// --- Market Coins (Paginated) ---
+const getMarketCoins = async (req, res) => {
+    let { page = 1, limit = 20, sort = 'rank', search = '' } = req.query;
+    page = parseInt(page);
+    limit = parseInt(limit);
+
+    try {
+        // Use cached public Binance instance
+        const exchange = getPublicExchange('binance');
+        await exchange.loadMarkets();
+        const tickers = await exchange.fetchTickers();
+
+        // Convert to array
+        let items = Object.values(tickers).filter(t => t.symbol.endsWith('/USDT'));
+
+        // Search Filter
+        if (search) {
+            const q = search.toUpperCase();
+            items = items.filter(t => t.symbol.includes(q));
+        }
+
+        // Sorting Logic
+        if (sort === 'volume_desc') { // Top Traded
+            items.sort((a, b) => (b.quoteVolume || 0) - (a.quoteVolume || 0));
+        } else if (sort === 'change_desc') { // 24H Gainers
+            items.sort((a, b) => (b.percentage || 0) - (a.percentage || 0));
+        } else if (sort === 'change_asc') { // 24H Losers
+            items.sort((a, b) => (a.percentage || 0) - (b.percentage || 0));
+        } else {
+            // Default: Sort by volume as a proxy for 'rank/popularity' 
+            items.sort((a, b) => (b.quoteVolume || 0) - (a.quoteVolume || 0));
+        }
+
+        // Pagination
+        const startIndex = (page - 1) * limit;
+        const endIndex = page * limit;
+        const paginatedItems = items.slice(startIndex, endIndex);
+
+        // Fetch Sparklines for the visible page
+        const results = await Promise.all(paginatedItems.map(async (t) => {
+            let sparkline = [];
+            try {
+                // Optimization: Only fetch last 24h
+                const ohlcv = await exchange.fetchOHLCV(t.symbol, '1h', undefined, 24);
+                sparkline = ohlcv.map(x => x[4]); // Close price
+            } catch (e) { }
+
+            return {
+                symbol: t.symbol.replace('/USDT', ''), // Clean name
+                pair: t.symbol,
+                price: t.last,
+                change: t.percentage,
+                volume: t.quoteVolume,
+                sparkline: sparkline
+            };
+        }));
+
+        res.json({
+            data: results,
+            page,
+            totalPages: Math.ceil(items.length / limit),
+            hasMore: endIndex < items.length
+        });
+
+    } catch (err) {
+        console.error("Market Coins Error:", err.message);
+        res.status(500).json({ message: "Failed to fetch market data" });
+    }
+};
+
 // --- Bot Status Sync (Python -> Node) ---
 const updateBotStatus = async (req, res) => {
     const { bot_id, status } = req.body;
@@ -1319,5 +1552,7 @@ module.exports = {
     getUserExchanges,
     deleteExchange,
     getTopGainers,
-    updateBotStatus
+    updateBotStatus,
+    getDailyStats,
+    getMarketCoins
 };

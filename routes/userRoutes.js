@@ -28,7 +28,9 @@ const {
     recordBotTrade,      // <--- NEW: Receives trades FROM Python Engine
     getSupportedExchanges,
     getTopGainers, // <--- Imported
-    updateBotStatus // <--- NEW: Status Sync
+    updateBotStatus, // <--- NEW: Status Sync
+    getDailyStats,
+    getMarketCoins
 } = require('../controllers/userController');
 
 const { protect } = require('../middleware/authMiddleware');
@@ -56,12 +58,14 @@ router.delete('/bot/:id', protect, deleteBot);          // Delete Bot
 
 // --- Dashboard & Portfolio ---
 router.get('/dashboard', protect, getDashboard);
+router.get('/daily-stats', protect, getDailyStats); // Mobile specific route
 router.get('/portfolio', protect, getPortfolio);
 
 // --- Terminal / Live Market Data (Public) ---
 router.get('/market-data', getMarketData);
 router.get('/market-tickers', getMarketTickers);
 router.get('/market-candles', getMarketCandles);
+router.get('/market-coins', getMarketCoins); // <--- NEW Paginated Market Route
 router.get('/market-top-gainers', getTopGainers); // <--- NEW Public Route
 
 // --- Backtesting Routes ---
